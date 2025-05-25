@@ -6,7 +6,7 @@ import { getAnalytics } from "firebase/analytics"; // You have this, so we'll ke
 
 // Your web app's Firebase configuration
 const firebaseConfig = {
-  apiKey: "AIzaSyDSTfvnT9MPXKNjzaJrtEgHuXsrMIJ_1Rw",
+  apiKey: "",
   authDomain: "chittertype-460820.firebaseapp.com",
   projectId: "chittertype-460820",
   storageBucket: "chittertype-460820.appspot.com", // Standard format often ends with .appspot.com. Please double-check this value in your Firebase console. If .firebasestorage.app is correct from your console, use that.
