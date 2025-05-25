@@ -31,7 +31,8 @@ import {
   getDoc, 
   limit, 
   arrayUnion, 
-  arrayRemove 
+  arrayRemove,
+  Timestamp 
 } from 'firebase/firestore';
 import { 
   LogOut, MessageSquareText, Send, AlertTriangle, UserPlus, LogIn, Users, 
@@ -40,23 +41,35 @@ import {
   XCircle, Image as ImageIcon, FileText as FileTextIcon, Save, X, Palette, 
   UserPlus2, Users2, Hash, ShieldCheck, Trash2, Moon, Sun, UploadCloud, ArrowLeft, PaintBucket, Check, 
   Volume2, VolumeX, ThumbsUp, UserCheck, UserX, Volume1, Eye, UserMinus, CircleUserRound, BadgeHelp, CircleSlash,
-  Gift, Award, SlidersHorizontal // For Admin Portal icon
+  Gift, Award, UserCog, UsersRound, PlusCircle, Link2, UserCircle2, MailPlus, Crown, Diamond // For group invite and membership icons
 } from 'lucide-react';
 
 // --- App ID for Firestore Path ---
-const APP_NAMESPACE_ID = "skab-chat-v1.15-admin-portal"; // Updated version
+const APP_NAMESPACE_ID = "skab-chat-v1.20-groups-membership"; // Updated version
 
 // --- Helper to generate discriminator ---
 const generateDiscriminator = () => String(Math.floor(1000 + Math.random() * 9000));
 
 // --- Badge Definitions ---
 const BADGE_DEFINITIONS = {
-  Dev: { name: 'Developer', imageSrc: '/badges/Dev.svg', description: 'Core Contributor & Developer' },
-  Premium: { name: 'Premium User', imageSrc: '/badges/Premium.svg', description: 'Valued Premium Supporter' },
-  AlphaOG: { name: 'Alpha OG', imageSrc: '/badges/AlphaOG.svg', description: 'Early Alpha Tester & Pioneer' },
-  Admin: { name: 'Administrator', imageSrc: '/badges/Admin.svg', description: 'Site Administrator (Grants Special Privileges)' }, 
+  Dev: { id: 'Dev', name: 'Developer', imageSrc: '/badges/Dev.svg', description: 'Core Contributor & Developer' },
+  Premium: { id: 'Premium', name: 'Premium User', imageSrc: '/badges/Premium.svg', description: 'Valued Premium Supporter' },
+  AlphaOG: { id: 'AlphaOG', name: 'Alpha OG', imageSrc: '/badges/AlphaOG.svg', description: 'Early Alpha Tester & Pioneer' },
+  Admin: { id: 'Admin', name: 'Administrator', imageSrc: '/badges/Admin.svg', description: 'Site Administrator (Grants Special Privileges)' }, 
 };
 const ASSIGNABLE_BADGES = ['Dev', 'Premium', 'AlphaOG']; 
+
+// Helper function to get priority badge for display next to name
+export const getPriorityBadgeInfo = (userBadges = []) => {
+  if (!Array.isArray(userBadges)) return null; 
+  if (userBadges.includes('Admin')) {
+    return BADGE_DEFINITIONS.Admin;
+  }
+  if (userBadges.includes('Dev')) {
+    return BADGE_DEFINITIONS.Dev;
+  }
+  return null; 
+};
 
 
 // --- Google Icon SVG ---
@@ -93,7 +106,8 @@ const AppProvider = ({ children }) => {
   const [soundEnabled, setSoundEnabled] = useState(localStorage.getItem(`${APP_NAMESPACE_ID}-soundEnabled`) === 'true');
   const [friends, setFriends] = useState([]); 
   const [friendRequests, setFriendRequests] = useState({ incoming: [], outgoing: [] }); 
-  const [blockedUsers, setBlockedUsers] = useState([]);
+  const [blockedUsersData, setBlockedUsersData] = useState([]); 
+  const [userGroups, setUserGroups] = useState([]); 
 
   const notificationSoundRef = useRef(null);
   const messageSoundRef = useRef(null); 
@@ -162,66 +176,88 @@ const AppProvider = ({ children }) => {
     }
   }, [displaySystemNotification]);
 
-  const addAppNotification = useCallback(async (targetUserId, type, actorInfo, messageText, link = null) => {
-    if (!targetUserId) return;
+  const addAppNotification = useCallback(async (targetUserId, type, actorInfo, messageText, link = null, relatedEntityId = null) => {
+    if (!targetUserId || !actorInfo || !actorInfo.uid) {
+      console.error("addAppNotification: Missing targetUserId or actorInfo.uid", {targetUserId, actorInfo});
+      return;
+    }
     try {
       await addDoc(collection(db, `users/${targetUserId}/user_notifications`), {
-        type: type, actorUid: actorInfo.uid, actorName: actorInfo.displayName, actorPhotoURL: actorInfo.photoURL,
-        message: messageText, link: link, timestamp: serverTimestamp(), isRead: false,
+        type: type, 
+        actorUid: actorInfo.uid, 
+        actorName: actorInfo.displayName || "A user", 
+        actorPhotoURL: actorInfo.photoURL || "",
+        message: messageText, 
+        link: link, 
+        relatedEntityId: relatedEntityId, 
+        timestamp: serverTimestamp(), 
+        isRead: false,
       });
     } catch (error) { console.error("Error adding app notification:", error); }
   }, []);
 
   const handleUserAction = useCallback(async (action, targetUser) => {
-    if (!user || !targetUser || user.uid === targetUser.uid) return;
+    const currentUserFromAuth = auth.currentUser; 
+    if (!currentUserFromAuth || !targetUser) {
+      console.warn("handleUserAction: currentUser or targetUser is missing.", { currentUserFromAuth, targetUser });
+      displaySystemNotification("Action cannot be performed. User data missing.", "error");
+      return;
+    }
+    if (currentUserFromAuth.uid === targetUser.uid && action !== 'viewProfile') { 
+      console.warn("handleUserAction: action on self not allowed (unless viewProfile)", { action });
+      return;
+    }
+
     const friendRequestQuery = (from, to) => query(collection(db, "friend_requests"), where("fromUid", "==", from), where("toUid", "==", to), where("status", "==", "pending"));
     
     try {
       if (action === 'addFriend') {
-        const friendSnap = await getDoc(doc(db, `users/${user.uid}/friends`, targetUser.uid));
+        const friendSnap = await getDoc(doc(db, `users/${currentUserFromAuth.uid}/friends`, targetUser.uid));
         if (friendSnap.exists()) { displaySystemNotification("You are already friends with this user.", 'info'); return; }
-        const existingSentSnap = await getDocs(friendRequestQuery(user.uid, targetUser.uid));
+        const existingSentSnap = await getDocs(friendRequestQuery(currentUserFromAuth.uid, targetUser.uid));
         if (!existingSentSnap.empty) { displaySystemNotification("Friend request already sent.", 'info'); return; }
-        const existingReceivedSnap = await getDocs(friendRequestQuery(targetUser.uid, user.uid));
+        const existingReceivedSnap = await getDocs(friendRequestQuery(targetUser.uid, currentUserFromAuth.uid));
         if (!existingReceivedSnap.empty) { 
-          // Automatically accept if there's an incoming request
           return handleUserAction('acceptFriend', targetUser); 
         }
 
         const frRef = doc(collection(db, "friend_requests"));
         await setDoc(frRef, {
-            fromUid: user.uid, fromName: user.displayName, fromPhotoURL: user.photoURL, fromDiscriminator: user.discriminator,
+            fromUid: currentUserFromAuth.uid, 
+            fromName: user?.displayName || currentUserFromAuth.displayName || "A Skab User", 
+            fromPhotoURL: user?.photoURL || currentUserFromAuth.photoURL || "", 
+            fromDiscriminator: user?.discriminator || '0000',
             toUid: targetUser.uid, toName: targetUser.displayName, toPhotoURL: targetUser.photoURL, toDiscriminator: targetUser.discriminator,
             status: 'pending', createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
         });
         addAppNotification(targetUser.uid, 'friend_request_received', 
-          { uid: user.uid, displayName: user.displayName, photoURL: user.photoURL }, 
-          `${user.displayName} sent you a friend request.`,
-          `/profile/${user.uid}` 
+          { uid: currentUserFromAuth.uid, displayName: user?.displayName || currentUserFromAuth.displayName || "A Skab User", photoURL: user?.photoURL || currentUserFromAuth.photoURL || "" }, 
+          `${user?.displayName || currentUserFromAuth.displayName || "A Skab User"} sent you a friend request.`,
+          `/friends` 
         );
         displaySystemNotification(`Friend request sent to ${targetUser.displayName || targetUser.email}!`, 'success', 3000, true);
 
       } else if (action === 'acceptFriend') {
-        const requestSnap = await getDocs(friendRequestQuery(targetUser.uid, user.uid));
+        const requestSnap = await getDocs(friendRequestQuery(targetUser.uid, currentUserFromAuth.uid));
         if (requestSnap.empty) { displaySystemNotification("Friend request not found or already handled.", 'info'); return; }
         const requestDoc = requestSnap.docs[0];
 
         const batch = writeBatch(db);
         batch.update(requestDoc.ref, { status: 'accepted', updatedAt: serverTimestamp() });
-        batch.set(doc(db, `users/${user.uid}/friends`, targetUser.uid), { friendUid: targetUser.uid, friendName: targetUser.displayName, friendPhotoURL: targetUser.photoURL, friendDiscriminator: targetUser.discriminator, status: 'accepted', friendedAt: serverTimestamp() });
-        batch.set(doc(db, `users/${targetUser.uid}/friends`, user.uid), { friendUid: user.uid, friendName: user.displayName, friendPhotoURL: user.photoURL, friendDiscriminator: user.discriminator, status: 'accepted', friendedAt: serverTimestamp() });
+        batch.set(doc(db, `users/${currentUserFromAuth.uid}/friends`, targetUser.uid), { friendUid: targetUser.uid, friendName: targetUser.displayName, friendPhotoURL: targetUser.photoURL, friendDiscriminator: targetUser.discriminator, status: 'accepted', friendedAt: serverTimestamp() });
+        batch.set(doc(db, `users/${targetUser.uid}/friends`, currentUserFromAuth.uid), { friendUid: currentUserFromAuth.uid, friendName: user?.displayName || currentUserFromAuth.displayName, friendPhotoURL: user?.photoURL || currentUserFromAuth.photoURL, friendDiscriminator: user?.discriminator || '0000', status: 'accepted', friendedAt: serverTimestamp() });
         await batch.commit();
         
         addAppNotification(targetUser.uid, 'friend_request_accepted', 
-          { uid: user.uid, displayName: user.displayName, photoURL: user.photoURL }, 
-          `${user.displayName} accepted your friend request.`,
-          `/profile/${user.uid}`
+          { uid: currentUserFromAuth.uid, displayName: user?.displayName || currentUserFromAuth.displayName, photoURL: user?.photoURL || currentUserFromAuth.photoURL }, 
+          `${user?.displayName || currentUserFromAuth.displayName} accepted your friend request.`,
+          `/profile/${currentUserFromAuth.uid}`
         );
         displaySystemNotification(`You are now friends with ${targetUser.displayName || targetUser.email}!`, 'success', 3000, true);
 
       } else if (action === 'declineFriend' || action === 'cancelFriendRequest') {
-        const fromUID = action === 'declineFriend' ? targetUser.uid : user.uid;
-        const toUID = action === 'declineFriend' ? user.uid : targetUser.uid;
+        const fromUID = action === 'declineFriend' ? targetUser.uid : currentUserFromAuth.uid;
+        const toUID = action === 'declineFriend' ? currentUserFromAuth.uid : targetUser.uid;
         const q = query(collection(db, "friend_requests"), where("fromUid", "==", fromUID), where("toUid", "==", toUID), where("status", "==", "pending"));
         const requestSnap = await getDocs(q);
         if (requestSnap.empty) { displaySystemNotification("Friend request not found or already handled.", 'info'); return; }
@@ -234,34 +270,41 @@ const AppProvider = ({ children }) => {
       } else if (action === 'removeFriend') {
         if (!window.confirm(`Are you sure you want to remove ${targetUser.displayName} as a friend?`)) return;
         const batch = writeBatch(db);
-        batch.delete(doc(db, `users/${user.uid}/friends`, targetUser.uid));
-        batch.delete(doc(db, `users/${targetUser.uid}/friends`, user.uid));
+        batch.delete(doc(db, `users/${currentUserFromAuth.uid}/friends`, targetUser.uid));
+        batch.delete(doc(db, `users/${targetUser.uid}/friends`, currentUserFromAuth.uid));
         await batch.commit();
         displaySystemNotification(`${targetUser.displayName} removed from friends.`, 'success');
         if (currentChat?.id === targetUser.uid) setCurrentChat(null);
 
       } else if (action === 'blockUser') {
         if (!window.confirm(`Are you sure you want to block ${targetUser.displayName}? They will not be able to message you or send friend requests.`)) return;
-        await setDoc(doc(db, `users/${user.uid}/blockedUsers`, targetUser.uid), {
-            blockedAt: serverTimestamp(), displayName: targetUser.displayName, photoURL: targetUser.photoURL
+        await setDoc(doc(db, `users/${currentUserFromAuth.uid}/blockedUsers`, targetUser.uid), {
+            blockedAt: serverTimestamp(), displayName: targetUser.displayName, photoURL: targetUser.photoURL, uid: targetUser.uid 
         });
         displaySystemNotification(`${targetUser.displayName} has been blocked.`, 'success');
         if (currentChat?.id === targetUser.uid) setCurrentChat(null);
         const batch = writeBatch(db);
-        batch.delete(doc(db, `users/${user.uid}/friends`, targetUser.uid));
-        batch.delete(doc(db, `users/${targetUser.uid}/friends`, user.uid));
-        const frQuerySent = query(collection(db, "friend_requests"), where("fromUid", "==", user.uid), where("toUid", "==", targetUser.uid));
-        const frQueryReceived = query(collection(db, "friend_requests"), where("fromUid", "==", targetUser.uid), where("toUid", "==", user.uid));
+        batch.delete(doc(db, `users/${currentUserFromAuth.uid}/friends`, targetUser.uid));
+        batch.delete(doc(db, `users/${targetUser.uid}/friends`, currentUserFromAuth.uid));
+        const frQuerySent = query(collection(db, "friend_requests"), where("fromUid", "==", currentUserFromAuth.uid), where("toUid", "==", targetUser.uid));
+        const frQueryReceived = query(collection(db, "friend_requests"), where("fromUid", "==", targetUser.uid), where("toUid", "==", currentUserFromAuth.uid));
         (await getDocs(frQuerySent)).docs.forEach(d => batch.delete(d.ref));
         (await getDocs(frQueryReceived)).docs.forEach(d => batch.delete(d.ref));
         await batch.commit().catch(e => console.warn("Error cleaning up relations after block:", e));
 
       } else if (action === 'unblockUser') {
-        await deleteDoc(doc(db, `users/${user.uid}/blockedUsers`, targetUser.uid));
+        await deleteDoc(doc(db, `users/${currentUserFromAuth.uid}/blockedUsers`, targetUser.uid));
         displaySystemNotification(`${targetUser.displayName} has been unblocked.`, 'success');
       
       } else if (action === 'viewProfile') {
-        setModalData(targetUser); setModalView('viewProfile');
+        const userDocSnap = await getDoc(doc(db, "users", targetUser.uid));
+        if (userDocSnap.exists()) {
+            setModalData({ uid: targetUser.uid, ...userDocSnap.data() }); 
+        } else {
+            setModalData(targetUser); 
+            console.warn("Viewing profile for a user not found in DB, using potentially partial data:", targetUser);
+        }
+        setModalView('viewProfile');
       }
     } catch (error) {
       console.error(`Error performing action '${action}':`, error);
@@ -291,6 +334,41 @@ const AppProvider = ({ children }) => {
     }
   }, [user, displaySystemNotification, modalData, setModalData]);
 
+  const createGroup = useCallback(async (groupName) => {
+    if (!user || !groupName.trim()) {
+      displaySystemNotification("Group name cannot be empty.", "error");
+      return null;
+    }
+    try {
+      const groupRef = await addDoc(collection(db, "groups"), {
+        name: groupName.trim(),
+        creatorUid: user.uid,
+        creatorName: user.displayName,
+        createdAt: serverTimestamp(),
+        members: [user.uid], 
+        memberInfo: { 
+          [user.uid]: {
+            displayName: user.displayName,
+            photoURL: user.photoURL
+          }
+        },
+        lastMessageTimestamp: serverTimestamp(), 
+        lastMessageText: "Group created",
+      });
+      await setDoc(doc(db, `users/${user.uid}/user_groups`, groupRef.id), {
+          groupId: groupRef.id,
+          name: groupName.trim(),
+          joinedAt: serverTimestamp()
+      });
+      displaySystemNotification(`Group "${groupName.trim()}" created!`, "success", 3000, true);
+      return groupRef.id;
+    } catch (error) {
+      console.error("Error creating group:", error);
+      displaySystemNotification("Failed to create group.", "error");
+      return null;
+    }
+  }, [user, displaySystemNotification]);
+
 
   useEffect(() => {
     const unsubscribeAuth = onAuthStateChanged(auth, (firebaseUser) => {
@@ -300,6 +378,7 @@ const AppProvider = ({ children }) => {
       let friendRequestsToUnsubscribe = () => {};
       let friendRequestsFromUnsubscribe = () => {};
       let blockedUsersUnsubscribe = () => {};
+      let userGroupsUnsubscribe = () => {};
 
       if (firebaseUser) {
         const userDocRef = doc(db, "users", firebaseUser.uid);
@@ -345,7 +424,7 @@ const AppProvider = ({ children }) => {
                 setUser({ uid: firebaseUser.uid, email: firebaseUser.email, displayName: currentDisplayName, discriminator: discriminator, photoURL: currentPhotoURL, status: "online", bio: "", badges: [], isAdmin: false });
              } catch (setDocError) { console.error("Error creating user document:", setDocError); }
             }
-            if (view === 'login' && !loading) setView('chat'); // Only switch if not initial loading phase already completed
+            if (view === 'login' && !loading) setView('chat'); 
             if(loading) setLoading(false); 
           }, 
           (profileError) => {
@@ -387,30 +466,36 @@ const AppProvider = ({ children }) => {
 
         const blockedUsersRef = collection(db, `users/${firebaseUser.uid}/blockedUsers`);
         blockedUsersUnsubscribe = onSnapshot(blockedUsersRef, (snapshot) => {
-            setBlockedUsers(snapshot.docs.map(doc => doc.id)); 
+            setBlockedUsersData(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))); 
         }, (error) => console.error("Error fetching blocked users:", error));
+
+        const groupsQuery = query(collection(db, "groups"), where("members", "array-contains", firebaseUser.uid), orderBy("lastMessageTimestamp", "desc"));
+        userGroupsUnsubscribe = onSnapshot(groupsQuery, (snapshot) => {
+            setUserGroups(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        }, (error) => console.error("Error fetching user groups:", error));
+
 
       } else {
         setUser(null); setView('login'); setCurrentChat(null); setLoading(false);
-        setAppNotifications([]); setUnreadNotificationCount(0); setFriends([]); setFriendRequests({ incoming: [], outgoing: [] }); setBlockedUsers([]);
+        setAppNotifications([]); setUnreadNotificationCount(0); setFriends([]); setFriendRequests({ incoming: [], outgoing: [] }); setBlockedUsersData([]); setUserGroups([]);
       }
       return () => {
         profileUnsubscribe(); notificationsUnsubscribe(); friendsUnsubscribe(); 
-        friendRequestsToUnsubscribe(); friendRequestsFromUnsubscribe(); blockedUsersUnsubscribe();
+        friendRequestsToUnsubscribe(); friendRequestsFromUnsubscribe(); blockedUsersUnsubscribe(); userGroupsUnsubscribe();
       }; 
     });
     return () => unsubscribeAuth(); 
-  }, [view, loading]); // Simplified dependency array for the main auth effect.
+  }, [view, loading]); 
   
   const contextValue = useMemo(() => ({
     user, setUser, loading, systemNotification, displaySystemNotification, view, setView, currentChat, setCurrentChat, isMobileView,
     isNotificationsPanelOpen, setIsNotificationsPanelOpen, appNotifications, setAppNotifications, unreadNotificationCount, setUnreadNotificationCount, addAppNotification,
     theme, setTheme, notificationPermission, requestNotificationPerm, hasInteracted, setHasInteracted, 
     soundEnabled, setSoundEnabled, attemptPlaySound, messageSoundRef, notificationSoundRef,
-    friends, friendRequests, blockedUsers, setBlockedUsers, 
+    friends, friendRequests, blockedUsers: blockedUsersData.map(b => b.id), blockedUsersData, 
     modalView, setModalView, modalData, setModalData, 
-    handleUserAction, assignBadgesToUser 
-  }), [user, loading, systemNotification, displaySystemNotification, view, currentChat, isMobileView, isNotificationsPanelOpen, appNotifications, unreadNotificationCount, addAppNotification, theme, notificationPermission, requestNotificationPerm, hasInteracted, soundEnabled, attemptPlaySound, friends, friendRequests, blockedUsers, modalView, modalData, handleUserAction, assignBadgesToUser ]);
+    handleUserAction, assignBadgesToUser, userGroups, createGroup
+  }), [user, loading, systemNotification, displaySystemNotification, view, currentChat, isMobileView, isNotificationsPanelOpen, appNotifications, unreadNotificationCount, addAppNotification, theme, notificationPermission, requestNotificationPerm, hasInteracted, soundEnabled, attemptPlaySound, friends, friendRequests, blockedUsersData, modalView, modalData, handleUserAction, assignBadgesToUser, userGroups, createGroup ]);
 
   return (
     <AppContext.Provider value={contextValue}>
@@ -518,10 +603,11 @@ const AuthForm = () => {
 
 
 const UserListItem = React.memo(({ contact, onClick, isActive, onUserAction, isFriend, hasPendingRequestFrom, hasSentRequestTo, isBlocked, itemType }) => {
-  const { user } = useAppContext();
+  const { user, handleUserAction: contextHandleUserAction } = useAppContext(); 
   const [showSubMenu, setShowSubMenu] = useState(false);
   const subMenuRef = useRef(null);
   const hasUnread = contact.lastMessage && contact.lastMessage.userId !== user?.uid && !isActive;
+  const priorityBadgeInfo = getPriorityBadgeInfo(contact.badges);
 
   useEffect(() => {
     const handleClickOutside = (event) => { if (subMenuRef.current && !subMenuRef.current.contains(event.target)) { setShowSubMenu(false); }};
@@ -529,32 +615,46 @@ const UserListItem = React.memo(({ contact, onClick, isActive, onUserAction, isF
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  const handleItemClick = (e) => { if (showSubMenu || e.target.closest('button.user-action-button')) { return; } onClick(); };
+  const handleItemClick = (e) => { 
+    if (showSubMenu || e.target.closest('button.user-action-button') || e.target.closest('button.direct-action-button')) { 
+      return; 
+    } 
+    onClick(); 
+  };
 
   let itemContextSpecificClass = '';
   if (itemType === 'incomingRequest') itemContextSpecificClass = 'bg-green-50 hover:bg-green-100 border-l-4 border-green-500';
   else if (itemType === 'outgoingRequest') itemContextSpecificClass = 'bg-yellow-50 hover:bg-yellow-100 border-l-4 border-yellow-500';
   else if (itemType === 'friend') itemContextSpecificClass = 'hover:bg-purple-50';
-  else itemContextSpecificClass = 'hover:bg-purple-50'; // Default for 'People' tab
+  else itemContextSpecificClass = 'hover:bg-purple-50';
 
   return (
     <div 
       onClick={handleItemClick} 
       className={`flex items-center p-3.5 cursor-pointer rounded-xl transition-colors duration-150 mx-3 my-1.5 group relative ${isActive ? 'bg-purple-100 shadow-md' : itemContextSpecificClass}`}
     >
-      <div className="relative mr-4">
-        <img 
-          src={contact.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(contact.displayName || contact.email)}&background=${isActive ? '8B5CF6' : 'EDE9FE'}&color=${isActive ? 'FFFFFF' : '6D28D9'}&bold=true&size=48&rounded=true`} 
-          alt={contact.displayName || 'User'} 
-          className="w-12 h-12 rounded-full object-cover flex-shrink-0 border-2 border-white shadow-lg" 
-          onError={(e) => { e.target.onerror = null; e.target.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(contact.displayName?.[0] || 'U')}&background=D1D5DB&color=4B5563&bold=true&size=48&rounded=true`; }}
-        />
-        {hasUnread && (<span className="absolute top-0 right-0 block h-3 w-3 rounded-full ring-2 ring-white bg-red-500" title="Unread messages"></span>)}
-      </div>
+      <img 
+        src={contact.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(contact.displayName || contact.email)}&background=${isActive ? '8B5CF6' : 'EDE9FE'}&color=${isActive ? 'FFFFFF' : '6D28D9'}&bold=true&size=48&rounded=true`} 
+        alt={contact.displayName || 'User'} 
+        className="w-12 h-12 rounded-full object-cover flex-shrink-0 border-2 border-white shadow-lg mr-4 cursor-pointer" 
+        onClick={(e) => { e.stopPropagation(); contextHandleUserAction('viewProfile', contact);}}
+        onError={(e) => { e.target.onerror = null; e.target.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(contact.displayName?.[0] || 'U')}&background=D1D5DB&color=4B5563&bold=true&size=48&rounded=true`; }}
+      />
+      {hasUnread && (<span className="absolute top-3 left-10 block h-3 w-3 rounded-full ring-2 ring-white bg-red-500" title="Unread messages"></span>)}
+      
       <div className="flex-1 min-w-0">
         <div className="flex justify-between items-center">
           <p className={`font-semibold text-sm truncate ${isActive ? 'text-purple-700' : 'text-slate-800 group-hover:text-purple-600'}`}>
             {contact.displayName || contact.email.split('@')[0]}
+            {priorityBadgeInfo && (
+              <img 
+                src={priorityBadgeInfo.imageSrc} 
+                alt={priorityBadgeInfo.name} 
+                title={`${priorityBadgeInfo.name}: ${priorityBadgeInfo.description}`}
+                className="w-4 h-4 inline-block ml-1.5 align-middle" 
+                onError={(e) => { e.target.style.display = 'none'; }}
+              />
+            )}
             <span className="text-slate-400 font-normal text-xs ml-1">#{contact.discriminator || '0000'}</span>
           </p>
         </div>
@@ -567,19 +667,25 @@ const UserListItem = React.memo(({ contact, onClick, isActive, onUserAction, isF
         )}
         {itemType !== 'incomingRequest' && itemType !== 'outgoingRequest' && !contact.lastMessage && <p className="text-xs text-slate-400 italic mt-0.5">No recent activity</p>}
       </div>
-      {onUserAction && !isActive && (
+      
+      {itemType === 'incomingRequest' && !isActive && (
+        <div className="flex items-center ml-2 space-x-1">
+          <button onClick={(e) => { e.stopPropagation(); contextHandleUserAction('acceptFriend', contact); }} title="Accept Request" className="direct-action-button p-2 text-green-500 hover:text-green-700 hover:bg-green-100 rounded-full"><UserCheck size={18}/></button>
+          <button onClick={(e) => { e.stopPropagation(); contextHandleUserAction('declineFriend', contact); }} title="Decline Request" className="direct-action-button p-2 text-red-500 hover:text-red-700 hover:bg-red-100 rounded-full"><UserX size={18}/></button>
+        </div>
+      )}
+
+      {itemType !== 'incomingRequest' && onUserAction && !isActive && ( // Keep 3-dot menu for other cases
         <div className="relative ml-2">
           <button onClick={(e) => { e.stopPropagation(); setShowSubMenu(prev => !prev); }} title="More actions" className="user-action-button p-1.5 text-slate-400 hover:text-purple-600 hover:bg-purple-100 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"><MoreVertical size={18} /></button>
           {showSubMenu && (
             <div ref={subMenuRef} className="absolute right-0 top-full mt-1 w-48 bg-white border border-slate-200 rounded-lg shadow-xl py-1 z-10">
-              <button onClick={(e) => { e.stopPropagation(); onUserAction('viewProfile', contact); setShowSubMenu(false); }} className="w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-slate-100 flex items-center"><CircleUserRound size={16} className="mr-2"/> View Profile</button>
-              {isFriend && <button onClick={(e) => { e.stopPropagation(); onUserAction('removeFriend', contact); setShowSubMenu(false); }} className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 flex items-center"><UserX size={16} className="mr-2"/> Remove Friend</button>}
-              {!isFriend && !hasPendingRequestFrom && !hasSentRequestTo && <button onClick={(e) => { e.stopPropagation(); onUserAction('addFriend', contact); setShowSubMenu(false); }} className="w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-slate-100 flex items-center"><UserPlus2 size={16} className="mr-2"/> Add Friend</button>}
-              {hasPendingRequestFrom && <button onClick={(e) => { e.stopPropagation(); onUserAction('acceptFriend', contact); setShowSubMenu(false); }} className="w-full text-left px-3 py-2 text-sm text-green-600 hover:bg-green-50 flex items-center"><UserCheck size={16} className="mr-2"/> Accept Request</button>}
-              {hasPendingRequestFrom && <button onClick={(e) => { e.stopPropagation(); onUserAction('declineFriend', contact); setShowSubMenu(false); }} className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 flex items-center"><UserX size={16} className="mr-2"/> Decline Request</button>}
-              {hasSentRequestTo && <button onClick={(e) => { e.stopPropagation(); onUserAction('cancelFriendRequest', contact); setShowSubMenu(false); }} className="w-full text-left px-3 py-2 text-sm text-orange-600 hover:bg-orange-50 flex items-center"><UserX size={16} className="mr-2"/> Cancel Request</button>}
-              {!isBlocked && <button onClick={(e) => { e.stopPropagation(); onUserAction('blockUser', contact); setShowSubMenu(false); }} className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 flex items-center"><CircleSlash size={16} className="mr-2"/> Block User</button>}
-              {isBlocked && <button onClick={(e) => { e.stopPropagation(); onUserAction('unblockUser', contact); setShowSubMenu(false); }} className="w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-slate-100 flex items-center"><CircleSlash size={16} className="mr-2"/> Unblock User</button>}
+              <button onClick={(e) => { e.stopPropagation(); contextHandleUserAction('viewProfile', contact); setShowSubMenu(false); }} className="w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-slate-100 flex items-center"><CircleUserRound size={16} className="mr-2"/> View Profile</button>
+              {isFriend && <button onClick={(e) => { e.stopPropagation(); contextHandleUserAction('removeFriend', contact); setShowSubMenu(false); }} className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 flex items-center"><UserX size={16} className="mr-2"/> Remove Friend</button>}
+              {!isFriend && !hasSentRequestTo && <button onClick={(e) => { e.stopPropagation(); contextHandleUserAction('addFriend', contact); setShowSubMenu(false); }} className="w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-slate-100 flex items-center"><UserPlus2 size={16} className="mr-2"/> Add Friend</button>}
+              {hasSentRequestTo && <button onClick={(e) => { e.stopPropagation(); contextHandleUserAction('cancelFriendRequest', contact); setShowSubMenu(false); }} className="w-full text-left px-3 py-2 text-sm text-orange-600 hover:bg-orange-50 flex items-center"><UserX size={16} className="mr-2"/> Cancel Request</button>}
+              {!isBlocked && <button onClick={(e) => { e.stopPropagation(); contextHandleUserAction('blockUser', contact); setShowSubMenu(false); }} className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50 flex items-center"><CircleSlash size={16} className="mr-2"/> Block User</button>}
+              {isBlocked && <button onClick={(e) => { e.stopPropagation(); contextHandleUserAction('unblockUser', contact); setShowSubMenu(false); }} className="w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-slate-100 flex items-center"><CircleSlash size={16} className="mr-2"/> Unblock User</button>}
             </div>
           )}
         </div>
@@ -588,12 +694,46 @@ const UserListItem = React.memo(({ contact, onClick, isActive, onUserAction, isF
   );
 });
 
+const GroupListItem = React.memo(({ group, onClick, isActive }) => {
+  const { user } = useAppContext();
+  const hasUnread = group.lastMessageText && group.lastMessageSenderUid !== user?.uid && !isActive;
+
+  return (
+    <div 
+      onClick={onClick} 
+      className={`flex items-center p-3.5 hover:bg-purple-50 cursor-pointer rounded-xl transition-colors duration-150 mx-3 my-1.5 group relative ${isActive ? 'bg-purple-100 shadow-md' : 'hover:shadow-sm'}`}
+    >
+      <div className="relative mr-4">
+        <div className={`w-12 h-12 rounded-full flex items-center justify-center text-xl font-semibold text-white shadow-lg border-2 border-white ${isActive ? 'bg-purple-600' : 'bg-indigo-500 group-hover:bg-indigo-600'}`}>
+          {group.name?.substring(0, 2).toUpperCase() || 'Gr'}
+        </div>
+        {hasUnread && (
+          <span className="absolute top-0 right-0 block h-3 w-3 rounded-full ring-2 ring-white bg-red-500" title="Unread messages"></span>
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className={`font-semibold text-sm truncate ${isActive ? 'text-purple-700' : 'text-slate-800 group-hover:text-purple-600'}`}>
+          {group.name}
+        </p>
+        {group.lastMessageText ? (
+          <p className={`text-xs truncate mt-0.5 ${isActive ? 'text-purple-600 font-medium' : 'text-slate-500 group-hover:text-slate-600'}`}>
+            {group.lastMessageText.length > 30 ? `${group.lastMessageText.substring(0, 30)}...` : group.lastMessageText}
+          </p>
+        ) : (
+          <p className="text-xs text-slate-400 italic mt-0.5">No recent activity</p>
+        )}
+      </div>
+    </div>
+  );
+});
+
 
 const ChatSidebar = () => { 
-  const { user, setCurrentChat, currentChat, displaySystemNotification, setView, setIsNotificationsPanelOpen, unreadNotificationCount, friends, friendRequests, blockedUsers, setModalView, setModalData, handleUserAction } = useAppContext(); 
+  const { user, setCurrentChat, currentChat, displaySystemNotification, setView, setIsNotificationsPanelOpen, unreadNotificationCount, friends, friendRequests, blockedUsers, setModalView, setModalData, handleUserAction, userGroups, createGroup } = useAppContext(); 
   const [allUsers, setAllUsers] = useState([]); 
   const [searchTerm, setSearchTerm] = useState('');
   const [activeTab, setActiveTab] = useState('People'); 
+  const [showCreateGroupModal, setShowCreateGroupModal] = useState(false);
 
   useEffect(() => {
     if (!db || !user) return;
@@ -616,46 +756,65 @@ const ChatSidebar = () => {
   const listToDisplay = useMemo(() => {
     let sourceList = [];
     if (activeTab === 'People') {
-        sourceList = allUsers; 
+        sourceList = allUsers.map(u => ({...u, badges: u.badges || []})); 
     } else if (activeTab === 'Friends') { 
-        const incomingReqs = (friendRequests.incoming || []).map(req => ({
-            ...req, uid: req.fromUid, id: req.id, displayName: req.fromName, photoURL: req.fromPhotoURL, discriminator: req.fromDiscriminator, type: 'dm', itemType: 'incomingRequest'
-        }));
-        const outgoingReqs = (friendRequests.outgoing || []).map(req => ({
-             ...req, uid: req.toUid, id: req.id, displayName: req.toName, photoURL: req.toPhotoURL, discriminator: req.toDiscriminator, type: 'dm', itemType: 'outgoingRequest'
-        }));
-        const currentFriends = friends.map(f => ({
-            uid: f.friendUid, id: f.friendUid, displayName: f.friendName, photoURL: f.friendPhotoURL, discriminator: f.friendDiscriminator, type: 'dm', itemType: 'friend'
-        }));
+        const incomingReqs = (friendRequests.incoming || []).map(req => {
+            const fullUser = allUsers.find(u => u.uid === req.fromUid);
+            return { ...req, uid: req.fromUid, id: req.id, displayName: req.fromName, photoURL: req.fromPhotoURL, discriminator: req.fromDiscriminator, type: 'dm', itemType: 'incomingRequest', badges: fullUser?.badges || [] };
+        });
+        const outgoingReqs = (friendRequests.outgoing || []).map(req => {
+            const fullUser = allUsers.find(u => u.uid === req.toUid);
+            return { ...req, uid: req.toUid, id: req.id, displayName: req.toName, photoURL: req.toPhotoURL, discriminator: req.toDiscriminator, type: 'dm', itemType: 'outgoingRequest', badges: fullUser?.badges || [] };
+        });
+        const currentFriends = friends.map(f => {
+            const fullUser = allUsers.find(u => u.uid === f.friendUid);
+            return { uid: f.friendUid, id: f.friendUid, displayName: f.friendName, photoURL: f.friendPhotoURL, discriminator: f.friendDiscriminator, type: 'dm', itemType: 'friend', badges: fullUser?.badges || [] };
+        });
         sourceList = [...incomingReqs, ...outgoingReqs, ...currentFriends];
     } else if (activeTab === 'Groups') {
-        sourceList = []; 
+        sourceList = userGroups.map(g => ({...g, type: 'group'})); 
     }
 
     if (!searchTerm.trim()) return sourceList;
     return sourceList.filter(contact => {
-      const nameMatch = (contact.displayName || '').toLowerCase().includes(searchTerm.toLowerCase());
+      const nameMatch = (contact.displayName || contact.name || '').toLowerCase().includes(searchTerm.toLowerCase()); // Check contact.name for groups
       const emailMatch = (contact.email || '').toLowerCase().includes(searchTerm.toLowerCase()); 
       const fullTag = `${contact.displayName || ''}#${contact.discriminator || ''}`.toLowerCase();
       const tagMatch = fullTag.includes(searchTerm.toLowerCase());
       return nameMatch || emailMatch || tagMatch;
     });
-  }, [allUsers, friends, friendRequests, searchTerm, activeTab]);
+  }, [allUsers, friends, friendRequests, searchTerm, activeTab, userGroups]);
+  
+  const loggedInUserPriorityBadge = getPriorityBadgeInfo(user?.badges);
 
   const selectChat = useCallback((contact) => {
-    if (blockedUsers.includes(contact.uid)) { displaySystemNotification("Cannot open chat with a blocked user.", "info"); return; }
-    setCurrentChat({
-      id: contact.uid, type: 'dm',
-      name: `${contact.displayName || contact.email?.split('@')[0]}#${contact.discriminator || '0000'}`,
-      rawName: contact.displayName || contact.email?.split('@')[0], 
-      discriminator: contact.discriminator || '0000', 
-      photoURL: contact.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(contact.displayName || contact.email)}&background=random&color=fff&bold=true&size=48&rounded=true`
-    });
+    if (contact.type === 'dm') {
+        if (blockedUsers.includes(contact.uid)) { displaySystemNotification("Cannot open chat with a blocked user.", "info"); return; }
+        setCurrentChat({
+            id: contact.uid, type: 'dm',
+            name: `${contact.displayName || contact.email?.split('@')[0]}#${contact.discriminator || '0000'}`,
+            rawName: contact.displayName || contact.email?.split('@')[0], 
+            discriminator: contact.discriminator || '0000', 
+            photoURL: contact.photoURL,
+            badges: contact.badges || [] 
+        });
+    } else if (contact.type === 'group') {
+        setCurrentChat({
+            id: contact.id, // Group ID
+            type: 'group',
+            name: contact.name,
+            rawName: contact.name, // For consistency
+            photoURL: contact.photoURL, // Group avatar if available
+            members: contact.members, // Array of member UIDs
+            memberInfo: contact.memberInfo, // Object with member details
+        });
+    }
   }, [setCurrentChat, blockedUsers, displaySystemNotification]);
 
   const sidebarTabs = [
     { name: 'People', icon: Users, id: 'People' },
     { name: 'Friends', icon: UserCheck, id: 'Friends', count: (friendRequests.incoming || []).length }, 
+    { name: 'Groups', icon: UsersRound, id: 'Groups' },
   ];
 
   return (
@@ -665,7 +824,18 @@ const ChatSidebar = () => {
           <div className="flex items-center space-x-3 group cursor-pointer" onClick={() => setView('settings')}>
             <img src={user?.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(user?.displayName || user?.email)}&background=8B5CF6&color=FFFFFF&bold=true&size=40&rounded=true`} alt="My Avatar" className="w-10 h-10 rounded-full object-cover border-2 border-purple-200 group-hover:border-purple-500 transition-all shadow-sm" onError={(e) => { e.target.onerror = null; e.target.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(user?.displayName?.[0] || 'M')}&background=D1D5DB&color=4B5563&bold=true&size=40&rounded=true`; }}/>
             <div>
-              <h2 className="font-semibold text-slate-800 text-lg group-hover:text-purple-600 transition-colors -mb-0.5">{user?.displayName?.split(' ')[0] || user?.email?.split('@')[0]}</h2>
+              <h2 className="font-semibold text-slate-800 text-lg group-hover:text-purple-600 transition-colors -mb-0.5">
+                {user?.displayName?.split(' ')[0] || user?.email?.split('@')[0]}
+                {loggedInUserPriorityBadge && (
+                  <img 
+                    src={loggedInUserPriorityBadge.imageSrc} 
+                    alt={loggedInUserPriorityBadge.name} 
+                    title={`${loggedInUserPriorityBadge.name}: ${loggedInUserPriorityBadge.description}`}
+                    className="w-4 h-4 inline-block ml-1.5 align-middle" 
+                    onError={(e) => { e.target.style.display = 'none'; }}
+                  />
+                )}
+              </h2>
               <p className="text-xs text-slate-500 group-hover:text-purple-500">#{user?.discriminator || '0000'}</p>
             </div>
           </div>
@@ -691,49 +861,67 @@ const ChatSidebar = () => {
             </button>
           ))}
         </div>
+        {activeTab === 'Groups' && (
+          <button 
+            onClick={() => setShowCreateGroupModal(true)} 
+            className="mt-3 w-full flex items-center justify-center py-2.5 px-4 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg shadow-sm transition-colors"
+          >
+            <PlusCircle size={18} className="mr-2"/> Create New Group
+          </button>
+        )}
       </div>
       <div className="flex-1 overflow-y-auto py-2 scrollbar-thin scrollbar-thumb-slate-300 scrollbar-track-slate-100">
         {listToDisplay.length > 0 ? (
-          listToDisplay.map(contact => (
-            <UserListItem
-              key={contact.id || contact.uid} contact={contact}
-              onClick={() => selectChat(contact)}
-              isActive={currentChat?.id === contact.uid && currentChat?.type === 'dm'}
-              onUserAction={handleUserAction} 
-              isFriend={friends.some(f => f.friendUid === contact.uid)}
-              hasPendingRequestFrom={(friendRequests.incoming || []).some(req => req.fromUid === contact.uid)}
-              hasSentRequestTo={(friendRequests.outgoing || []).some(req => req.toUid === contact.uid)}
-              isBlocked={blockedUsers.includes(contact.uid)}
-              itemType={contact.itemType} 
-            />
+          listToDisplay.map(contactOrGroup => (
+            contactOrGroup.type === 'group' ? (
+              <GroupListItem
+                key={contactOrGroup.id}
+                group={contactOrGroup}
+                onClick={() => selectChat(contactOrGroup)}
+                isActive={currentChat?.id === contactOrGroup.id && currentChat?.type === 'group'}
+              />
+            ) : (
+              <UserListItem
+                key={contactOrGroup.id || contactOrGroup.uid} contact={contactOrGroup}
+                onClick={() => selectChat(contactOrGroup)}
+                isActive={currentChat?.id === contactOrGroup.uid && currentChat?.type === 'dm'}
+                onUserAction={handleUserAction} 
+                isFriend={friends.some(f => f.friendUid === contactOrGroup.uid)}
+                hasPendingRequestFrom={(friendRequests.incoming || []).some(req => req.fromUid === contactOrGroup.uid)}
+                hasSentRequestTo={(friendRequests.outgoing || []).some(req => req.toUid === contactOrGroup.uid)}
+                isBlocked={blockedUsers.includes(contactOrGroup.uid)}
+                itemType={contactOrGroup.itemType} 
+              />
+            )
           ))
         ) : (
           <p className="text-center text-sm text-slate-500 p-8">{searchTerm ? "No results match your search." : (activeTab === 'People' ? "Find people to chat with." : (activeTab === 'Friends' && (friendRequests.incoming || []).length === 0 && friends.length === 0 ? "No friends or pending requests." : `No ${activeTab.toLowerCase()} yet.`))}</p>
         )}
       </div>
+      {showCreateGroupModal && <CreateGroupModal onClose={() => setShowCreateGroupModal(false)} onCreateGroup={createGroup} />}
     </div>
   );
 };
 
-const EMOJIS = ['😀', '😂', '😍', '🤔', '😢', '🎉', '👍', '❤️', '🔥', '💯', '🙏', '✨', '😊', '🥳', '🤩', '�', '😱', '👋', '👀', '👉', '👈', '👆', '👇', '👌', '🤷', '❤️‍🔥', '💔', '💯', '✅', '❌'];
+const EMOJIS = ['😀', '😂', '😍', '🤔', '😢', '🎉', '👍', '❤️', '🔥', '💯', '🙏', '✨', '😊', '🥳', '🤩', '😭', '😱', '👋', '👀', '👉', '👈', '👆', '👇', '👌', '🤷', '❤️‍🔥', '💔', '💯', '✅', '❌'];
 const EmojiPicker = React.memo(({ onEmojiSelect, onOutsideClick }) => { const pickerRef = useRef(null); useEffect(() => { const handleClickOutside = (event) => { if (pickerRef.current && !pickerRef.current.contains(event.target)) { const emojiButton = document.getElementById('emoji-toggle-button'); if (emojiButton && emojiButton.contains(event.target)) return; onOutsideClick(); } }; document.addEventListener("mousedown", handleClickOutside); return () => document.removeEventListener("mousedown", handleClickOutside); }, [onOutsideClick]); return ( <div ref={pickerRef} className="absolute bottom-full left-0 mb-2 w-72 bg-white border border-slate-200 rounded-xl shadow-xl p-3 z-30"> <div className="grid grid-cols-7 gap-1"> {EMOJIS.map(emoji => ( <button key={emoji} onClick={() => onEmojiSelect(emoji)} className="text-2xl p-1.5 rounded-lg hover:bg-slate-100 transition-colors focus:outline-none focus:ring-2 focus:ring-purple-400" title={emoji}> {emoji} </button> ))} </div> </div> );});
 
 const ChatMessageItem = React.memo(({ message, currentUserId }) => {
-  const { displaySystemNotification } = useAppContext(); 
+  const { displaySystemNotification, handleUserAction } = useAppContext(); 
   const isSender = message.userId === currentUserId;
   const timestamp = message.timestamp?.toDate ? message.timestamp.toDate() : new Date();
+  const senderPriorityBadgeInfo = getPriorityBadgeInfo(message.userBadges);
 
   const handleDelete = async () => {
     if (!window.confirm("Are you sure you want to delete this message? This action cannot be undone.")) return; 
     try {
-      let chatRoomId;
-      if (message.chatRoomId) { chatRoomId = message.chatRoomId; } 
-      else if (currentUserId && message.chatPartnerId) { chatRoomId = [currentUserId, message.chatPartnerId].sort().join('_');} 
-      else if (currentUserId && !isSender && message.userId) { chatRoomId = [currentUserId, message.userId].sort().join('_'); } 
-      else if (currentUserId && isSender && message.targetUserId) { chatRoomId = [currentUserId, message.targetUserId].sort().join('_'); } 
-      else { throw new Error("Could not determine chat room ID for deletion."); }
+      let messageRef;
+      if (message.chatType === 'group' && message.groupId) {
+        messageRef = doc(db, `group_messages/${message.groupId}/messages`, message.id);
+      } else if (message.chatRoomId) { // DM
+        messageRef = doc(db, `direct_messages/${message.chatRoomId}/messages`, message.id);
+      } else { throw new Error("Could not determine message path for deletion."); }
       
-      const messageRef = doc(db, `direct_messages/${chatRoomId}/messages`, message.id);
       await deleteDoc(messageRef);
       displaySystemNotification("Message deleted.", "success", 2000);
     } catch (error) {
@@ -741,11 +929,48 @@ const ChatMessageItem = React.memo(({ message, currentUserId }) => {
       displaySystemNotification("Failed to delete message. You can only delete your own messages.", "error");
     }
   };
+  
+  const viewSenderProfile = () => {
+    if (message.userId && handleUserAction) {
+        const senderProfileData = {
+            uid: message.userId,
+            displayName: message.userDisplayName,
+            photoURL: message.userPhotoURL, 
+            discriminator: message.userDiscriminator,
+            badges: message.userBadges || []
+        };
+        handleUserAction('viewProfile', senderProfileData);
+    }
+  };
+
 
   return (
     <div className={`group flex mb-3 ${isSender ? 'justify-end pl-10 sm:pl-16' : 'justify-start pr-10 sm:pr-16'}`}>
+      {!isSender && (
+        <img 
+          src={message.userPhotoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(message.userDisplayName || 'S')}&size=32&rounded=true&background=random&color=fff`} 
+          alt={message.userDisplayName}
+          className="w-8 h-8 rounded-full mr-2 cursor-pointer self-end mb-1 shadow-sm"
+          onClick={viewSenderProfile}
+          onError={(e) => { e.target.onerror = null; e.target.src=`https://ui-avatars.com/api/?name=${encodeURIComponent(message.userDisplayName?.[0] || 'S')}&size=32&rounded=true&background=D1D5DB&color=4B5563`;}}
+        />
+      )}
       <div className={`relative py-2.5 px-4 rounded-2xl ${isSender ? 'bg-purple-600 text-white rounded-br-none' : 'bg-white text-slate-800 rounded-bl-none border border-slate-200'} max-w-[70%] shadow-md`}>
-        {!isSender && message.userDisplayName && (<p className="text-xs font-semibold text-purple-700 mb-1">{message.userDisplayName}#{message.userDiscriminator || '0000'}</p>)}
+        {!isSender && message.userDisplayName && (
+          <p className="text-xs font-semibold text-purple-700 mb-1 flex items-center">
+            <span onClick={viewSenderProfile} className="cursor-pointer hover:underline">{message.userDisplayName}</span>
+            {senderPriorityBadgeInfo && (
+              <img 
+                src={senderPriorityBadgeInfo.imageSrc} 
+                alt={senderPriorityBadgeInfo.name} 
+                title={`${senderPriorityBadgeInfo.name}: ${senderPriorityBadgeInfo.description}`}
+                className="w-3.5 h-3.5 inline-block ml-1 align-middle" 
+                onError={(e) => { e.target.style.display = 'none'; }}
+              />
+            )}
+            <span className="text-slate-400 font-normal">#{message.userDiscriminator || '0000'}</span>
+          </p>
+        )}
         <p className="text-sm whitespace-pre-wrap leading-snug break-words">{message.text}</p> 
         <p className={`text-[10px] mt-1.5 ${isSender ? 'text-purple-200' : 'text-slate-400'} ${isSender ? 'text-right' : 'text-left'}`}>{timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
         {isSender && ( <button onClick={handleDelete} className="absolute top-1 -right-2.5 transform translate-x-full p-1 text-slate-400 hover:text-red-500 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity" title="Delete message"><Trash2 size={14} /></button>)}
@@ -755,7 +980,7 @@ const ChatMessageItem = React.memo(({ message, currentUserId }) => {
 });
 
 const ChatWindow = () => { 
-  const { user, currentChat, setCurrentChat, displaySystemNotification, isMobileView, attemptPlaySound, messageSoundRef, addAppNotification, friends, blockedUsers, setModalView, setModalData } = useAppContext();
+  const { user, currentChat, setCurrentChat, displaySystemNotification, isMobileView, attemptPlaySound, messageSoundRef, addAppNotification, friends, blockedUsers, setModalView, setModalData, handleUserAction } = useAppContext();
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [isSending, setIsSending] = useState(false);
@@ -766,39 +991,54 @@ const ChatWindow = () => {
   const prevMessagesLengthRef = useRef(0);
   const chatActionsRef = useRef(null);
 
-  const isCurrentChatFriend = useMemo(() => friends.some(f => f.friendUid === currentChat?.id), [friends, currentChat]);
-  const isCurrentChatBlocked = useMemo(() => blockedUsers.includes(currentChat?.id), [blockedUsers, currentChat]);
+  const isCurrentChatFriend = useMemo(() => currentChat?.type === 'dm' && friends.some(f => f.friendUid === currentChat?.id), [friends, currentChat]);
+  const isCurrentChatBlocked = useMemo(() => currentChat?.type === 'dm' && blockedUsers.includes(currentChat?.id), [blockedUsers, currentChat]);
+  const chatPartnerPriorityBadgeInfo = getPriorityBadgeInfo(currentChat?.badges);
+
 
   useEffect(() => { if (messagesEndRef.current) { messagesEndRef.current.scrollIntoView({ behavior: "smooth" }); }}, [messages]);
 
   useEffect(() => {
     if (!db || !user || !currentChat) { setMessages([]); prevMessagesLengthRef.current = 0; return; }
-    if (blockedUsers.includes(currentChat.id)) { displaySystemNotification(`You have blocked ${currentChat.name}. Unblock to chat.`, "info"); setMessages([]); return; }
+    if (currentChat.type === 'dm' && blockedUsers.includes(currentChat.id)) { displaySystemNotification(`You have blocked ${currentChat.name}. Unblock to chat.`, "info"); setMessages([]); return; }
 
-    let q; let chatRoomId = '';
+    let q; let collectionPath = '';
     if (currentChat.type === 'dm') {
-      chatRoomId = [user.uid, currentChat.id].sort().join('_');
-      const messagesRef = collection(db, `direct_messages/${chatRoomId}/messages`);
-      q = query(messagesRef, orderBy("timestamp", "asc"));
+      const chatRoomId = [user.uid, currentChat.id].sort().join('_');
+      collectionPath = `direct_messages/${chatRoomId}/messages`;
+    } else if (currentChat.type === 'group') {
+      collectionPath = `group_messages/${currentChat.id}/messages`;
     } else { return; }
+    
+    const messagesRef = collection(db, collectionPath);
+    q = query(messagesRef, orderBy("timestamp", "asc"));
+
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
-      const fetchedMessages = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data(), chatPartnerId: currentChat.id, chatRoomId: chatRoomId }));
+      const fetchedMessages = snapshot.docs.map(doc => ({ 
+          id: doc.id, 
+          ...doc.data(),
+          chatType: currentChat.type, // Add chatType for context
+          groupId: currentChat.type === 'group' ? currentChat.id : null,
+          chatPartnerId: currentChat.type === 'dm' ? currentChat.id : null, 
+          chatRoomId: currentChat.type === 'dm' ? [user.uid, currentChat.id].sort().join('_') : null 
+      }));
+      
       if (fetchedMessages.length > prevMessagesLengthRef.current && document.hasFocus()) { 
         const latestMessage = fetchedMessages[fetchedMessages.length - 1];
         if (latestMessage && latestMessage.userId !== user.uid) {
           attemptPlaySound(messageSoundRef, 0.6); 
           if (Notification.permission === 'granted' && !document.hasFocus()) {
-            new Notification(`${latestMessage.userDisplayName || 'New Message'}`, {
+            new Notification(`${latestMessage.userDisplayName || 'New Message'} from ${currentChat.type === 'group' ? currentChat.name : (latestMessage.userDisplayName || 'Someone')}`, {
               body: latestMessage.text.length > 50 ? latestMessage.text.substring(0, 47) + '...' : latestMessage.text,
-              icon: '/logo.png', tag: chatRoomId 
+              icon: '/logo.png', tag: currentChat.id 
             });
           }
         }
       }
       prevMessagesLengthRef.current = fetchedMessages.length;
       setMessages(fetchedMessages);
-    }, (err) => { console.error(`Error fetching messages for chat ${currentChat.name} (ID: ${chatRoomId}):`, err); displaySystemNotification(`Could not load messages.`); });
+    }, (err) => { console.error(`Error fetching messages for chat ${currentChat.name} (ID: ${currentChat.id}):`, err); displaySystemNotification(`Could not load messages.`); });
     return () => unsubscribe();
   }, [db, user, currentChat, displaySystemNotification, attemptPlaySound, messageSoundRef, blockedUsers]);
 
@@ -807,17 +1047,47 @@ const ChatWindow = () => {
     if (!newMessage.trim() || !user || !currentChat || isSending || newMessage.length > 2000) { 
         if(newMessage.length > 2000) displaySystemNotification("Message exceeds 2000 characters.", "error"); return; 
     }
-    if (isCurrentChatBlocked) { displaySystemNotification("Cannot send message to a blocked user.", "error"); return; }
+    if (currentChat.type === 'dm' && isCurrentChatBlocked) { displaySystemNotification("Cannot send message to a blocked user.", "error"); return; }
     setIsSending(true);
-    const messageData = { text: newMessage, userId: user.uid, userEmail: user.email, userDisplayName: user.displayName || user.email.split('@')[0], userDiscriminator: user.discriminator || '0000', timestamp: serverTimestamp() };
+    const messageData = { 
+        text: newMessage, userId: user.uid, userEmail: user.email, 
+        userDisplayName: user.displayName || user.email.split('@')[0], 
+        userDiscriminator: user.discriminator || '0000', 
+        userBadges: user.badges || [], 
+        userPhotoURL: user.photoURL || '', 
+        timestamp: serverTimestamp() 
+    };
     try {
-      let messagesRef;
+      let messagesRefPath;
       if (currentChat.type === 'dm') {
         const chatRoomId = [user.uid, currentChat.id].sort().join('_');
-        messagesRef = collection(db, `direct_messages/${chatRoomId}/messages`);
+        messagesRefPath = `direct_messages/${chatRoomId}/messages`;
+        addAppNotification(currentChat.id, 'new_message', 
+            { uid: user.uid, displayName: user.displayName, photoURL: user.photoURL }, 
+            `${user.displayName}: ${newMessage.substring(0,30)}${newMessage.length > 30 ? '...' : ''}`,
+            `/chat/${user.uid}` // Link to open the chat with the sender
+        );
+      } else if (currentChat.type === 'group') {
+        messagesRefPath = `group_messages/${currentChat.id}/messages`;
+        await updateDoc(doc(db, "groups", currentChat.id), {
+            lastMessageText: newMessage,
+            lastMessageSenderUid: user.uid,
+            lastMessageSenderName: user.displayName,
+            lastMessageTimestamp: serverTimestamp()
+        });
+        currentChat.members?.forEach(memberUid => {
+            if (memberUid !== user.uid) {
+                addAppNotification(memberUid, 'new_group_message', 
+                    { uid: user.uid, displayName: user.displayName, photoURL: user.photoURL }, 
+                    `${currentChat.name}: ${newMessage.substring(0,30)}${newMessage.length > 30 ? '...' : ''}`, 
+                    `/group/${currentChat.id}`, // Link to open the group chat
+                    currentChat.id // relatedEntityId for group
+                );
+            }
+        });
       } else { throw new Error("Invalid chat type"); }
-      await addDoc(messagesRef, messageData);
-      addAppNotification(currentChat.id, 'new_message', { uid: user.uid, displayName: user.displayName, photoURL: user.photoURL }, `${user.displayName}: ${newMessage.substring(0,30)}${newMessage.length > 30 ? '...' : ''}`);
+      
+      await addDoc(collection(db, messagesRefPath), messageData);
       setNewMessage(''); setShowEmojiPicker(false); if (inputRef.current) inputRef.current.focus();
     } catch (err) { console.error("Error sending message:", err); displaySystemNotification("Failed to send message."); } 
     finally { setIsSending(false); }
@@ -826,35 +1096,19 @@ const ChatWindow = () => {
   const handleEmojiSelect = useCallback((emoji) => { setNewMessage(prev => { const newText = prev + emoji; return newText.length <= 2000 ? newText : prev; }); if (inputRef.current) inputRef.current.focus(); }, []);
   const handleGifPlaceholderClick = () => displaySystemNotification("GIF sharing coming soon!", "info", 3000);
 
-  const handleChatAction = (action) => {
+  const callHandleUserAction = (action, target) => { 
     setShowChatActions(false);
-    const targetUserForAction = { uid: currentChat.id, displayName: currentChat.rawName, photoURL: currentChat.photoURL, discriminator: currentChat.discriminator };
-    if (action === 'viewProfile') { setModalData(targetUserForAction); setModalView('viewProfile'); } 
-    else if (action === 'removeFriend') {
-        if (!window.confirm(`Are you sure you want to remove ${targetUserForAction.displayName} as a friend?`)) return;
-        const removeFriendLogic = async () => {
-            const batch = writeBatch(db);
-            batch.delete(doc(db, `users/${user.uid}/friends`, targetUserForAction.uid));
-            batch.delete(doc(db, `users/${targetUserForAction.uid}/friends`, user.uid));
-            await batch.commit();
-            displaySystemNotification(`${targetUserForAction.displayName} removed from friends.`, 'success');
-            setCurrentChat(null); 
-        };
-        removeFriendLogic().catch(err => displaySystemNotification("Failed to remove friend.", "error"));
-    } else if (action === 'blockUser') {
-        if (!window.confirm(`Are you sure you want to block ${targetUserForAction.displayName}?`)) return;
-        const blockUserLogic = async () => {
-            await setDoc(doc(db, `users/${user.uid}/blockedUsers`, targetUserForAction.uid), { blockedAt: serverTimestamp(), displayName: targetUserForAction.displayName });
-            displaySystemNotification(`${targetUserForAction.displayName} blocked.`, 'success');
-            setCurrentChat(null);
-        };
-        blockUserLogic().catch(err => displaySystemNotification("Failed to block user.", "error"));
-    } else if (action === 'unblockUser') {
-         const unblockUserLogic = async () => {
-            await deleteDoc(doc(db, `users/${user.uid}/blockedUsers`, targetUserForAction.uid));
-            displaySystemNotification(`${targetUserForAction.displayName} unblocked.`, 'success');
-        };
-        unblockUserLogic().catch(err => displaySystemNotification("Failed to unblock user.", "error"));
+    const targetUserForAction = { 
+        uid: target.id, 
+        displayName: target.rawName, 
+        photoURL: target.photoURL, 
+        discriminator: target.discriminator, 
+        badges: target.badges || [] 
+    };
+    if (handleUserAction) { 
+        handleUserAction(action, targetUserForAction);
+    } else {
+        console.error("handleUserAction is not available from context in ChatWindow");
     }
   };
   
@@ -866,20 +1120,45 @@ const ChatWindow = () => {
       <div className="bg-white p-4 border-b border-slate-200 flex items-center justify-between space-x-3 sticky top-0 z-20 shadow-sm">
         <div className="flex items-center space-x-3 min-w-0">
           {isMobileView && (<button onClick={() => setCurrentChat(null)} className="p-2 text-slate-500 hover:text-purple-600 rounded-full hover:bg-purple-50 transition-colors"><ChevronLeft size={22}/></button>)}
-          <img src={currentChat.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(currentChat.rawName || currentChat.name)}&background=random&color=fff&size=40&rounded=true`} alt={currentChat.name} className="w-10 h-10 rounded-full object-cover flex-shrink-0 shadow-sm" onError={(e) => { e.target.onerror = null; e.target.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(currentChat.rawName?.[0] || currentChat.name?.[0] || 'C')}&background=D1D5DB&color=4B5563&size=40&rounded=true`; }}/>
-          <div className="min-w-0"><h3 className="font-semibold text-slate-800 text-base truncate">{currentChat.name}</h3><p className={`text-xs ${isCurrentChatBlocked ? 'text-red-500' : 'text-green-500'}`}>{isCurrentChatBlocked ? 'Blocked' : 'Online'}</p></div>
+          <img 
+            src={currentChat.photoURL || (currentChat.type === 'group' ? `https://ui-avatars.com/api/?name=${encodeURIComponent(currentChat.name || 'G')}&background=6366F1&color=FFFFFF&bold=true&size=40&rounded=true` : `https://ui-avatars.com/api/?name=${encodeURIComponent(currentChat.rawName || currentChat.name)}&background=random&color=fff&size=40&rounded=true`)} 
+            alt={currentChat.name} 
+            className="w-10 h-10 rounded-full object-cover flex-shrink-0 shadow-sm cursor-pointer" 
+            onClick={() => { if(currentChat.type === 'dm') callHandleUserAction('viewProfile', currentChat); /* TODO: Group info modal? */ }}
+            onError={(e) => { e.target.onerror = null; e.target.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(currentChat.rawName?.[0] || currentChat.name?.[0] || 'C')}&background=D1D5DB&color=4B5563&size=40&rounded=true`; }}
+          />
+          <div className="min-w-0">
+            <h3 className="font-semibold text-slate-800 text-base truncate flex items-center">
+              {currentChat.rawName || currentChat.name.split('#')[0]}
+              {currentChat.type === 'dm' && chatPartnerPriorityBadgeInfo && (
+                <img 
+                  src={chatPartnerPriorityBadgeInfo.imageSrc} 
+                  alt={chatPartnerPriorityBadgeInfo.name} 
+                  title={`${chatPartnerPriorityBadgeInfo.name}: ${chatPartnerPriorityBadgeInfo.description}`}
+                  className="w-4 h-4 inline-block ml-1.5 align-middle" 
+                  onError={(e) => { e.target.style.display = 'none'; }}
+                />
+              )}
+               {currentChat.type === 'dm' && <span className="text-slate-400 font-normal text-xs ml-0.5">#{currentChat.discriminator || '0000'}</span>}
+            </h3>
+            {currentChat.type === 'dm' && <p className={`text-xs ${isCurrentChatBlocked ? 'text-red-500' : 'text-green-500'}`}>{isCurrentChatBlocked ? 'Blocked' : 'Online'}</p>}
+            {currentChat.type === 'group' && <p className="text-xs text-slate-500">{currentChat.members?.length || 0} members</p>}
+          </div>
         </div>
-        <div className="flex items-center space-x-1.5 relative" ref={chatActionsRef}>
-            <button onClick={() => setShowChatActions(prev => !prev)} className="p-2.5 text-slate-500 hover:text-purple-600 rounded-full hover:bg-purple-50 transition-colors"><MoreVertical size={19}/></button>
-            {showChatActions && (
-                <div className="absolute right-0 top-full mt-2 w-56 bg-white border border-slate-200 rounded-lg shadow-xl py-1 z-30">
-                    <button onClick={() => handleChatAction('viewProfile')} className="w-full text-left px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-100 flex items-center"><CircleUserRound size={16} className="mr-2.5"/> View Profile</button>
-                    {isCurrentChatFriend && !isCurrentChatBlocked && <button onClick={() => handleChatAction('removeFriend')} className="w-full text-left px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 flex items-center"><UserX size={16} className="mr-2.5"/> Remove Friend</button>}
-                    {!isCurrentChatBlocked && <button onClick={() => handleChatAction('blockUser')} className="w-full text-left px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 flex items-center"><CircleSlash size={16} className="mr-2.5"/> Block User</button>}
-                    {isCurrentChatBlocked && <button onClick={() => handleChatAction('unblockUser')} className="w-full text-left px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-100 flex items-center"><CircleSlash size={16} className="mr-2.5"/> Unblock User</button>}
-                </div>
-            )}
-        </div>
+        {currentChat.type === 'dm' && (
+          <div className="flex items-center space-x-1.5 relative" ref={chatActionsRef}>
+              <button onClick={() => setShowChatActions(prev => !prev)} className="p-2.5 text-slate-500 hover:text-purple-600 rounded-full hover:bg-purple-50 transition-colors"><MoreVertical size={19}/></button>
+              {showChatActions && (
+                  <div className="absolute right-0 top-full mt-2 w-56 bg-white border border-slate-200 rounded-lg shadow-xl py-1 z-30">
+                      <button onClick={() => callHandleUserAction('viewProfile', currentChat)} className="w-full text-left px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-100 flex items-center"><CircleUserRound size={16} className="mr-2.5"/> View Profile</button>
+                      {isCurrentChatFriend && !isCurrentChatBlocked && <button onClick={() => callHandleUserAction('removeFriend', currentChat)} className="w-full text-left px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 flex items-center"><UserX size={16} className="mr-2.5"/> Remove Friend</button>}
+                      {!isCurrentChatBlocked && <button onClick={() => callHandleUserAction('blockUser', currentChat)} className="w-full text-left px-4 py-2.5 text-sm text-red-600 hover:bg-red-50 flex items-center"><CircleSlash size={16} className="mr-2.5"/> Block User</button>}
+                      {isCurrentChatBlocked && <button onClick={() => callHandleUserAction('unblockUser', currentChat)} className="w-full text-left px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-100 flex items-center"><CircleSlash size={16} className="mr-2.5"/> Unblock User</button>}
+                  </div>
+              )}
+          </div>
+        )}
+         {/* TODO: Add group settings menu here */}
       </div>
       <div className="flex-1 overflow-y-auto p-5 space-y-2 scrollbar-thin scrollbar-thumb-slate-300 scrollbar-track-transparent">{messages.map(msg => (<ChatMessageItem key={msg.id} message={msg} currentUserId={user.uid} />))}<div ref={messagesEndRef} /></div>
       <div className="bg-white p-4 border-t border-slate-200 sticky bottom-0 z-20 mt-auto">
@@ -889,11 +1168,11 @@ const ChatWindow = () => {
             <button id="emoji-toggle-button" type="button" onClick={() => setShowEmojiPicker(prev => !prev)} className="p-2.5 text-slate-500 hover:text-purple-600 rounded-full hover:bg-purple-50 transition-colors"><Smile size={22} /></button>
             <button type="button" onClick={handleGifPlaceholderClick} className="p-2.5 text-slate-500 hover:text-purple-600 rounded-full hover:bg-purple-50 transition-colors" title="Send a GIF (coming soon)"><Gift size={22} /></button>
             <div className="flex-1 relative">
-              <textarea ref={inputRef} value={newMessage} onChange={(e) => { if (e.target.value.length <= 2000) setNewMessage(e.target.value);}} placeholder={isCurrentChatBlocked ? "This user is blocked." : "Type a message here..."} className="w-full p-3 pr-20 h-12 bg-slate-100 border-transparent focus:border-purple-500 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none text-sm transition-shadow text-slate-800 placeholder-slate-500 resize-none scrollbar-thin" rows="1" maxLength={2000} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(e);}}} disabled={isSending || isCurrentChatBlocked} />
+              <textarea ref={inputRef} value={newMessage} onChange={(e) => { if (e.target.value.length <= 2000) setNewMessage(e.target.value);}} placeholder={isCurrentChatBlocked ? "This user is blocked." : "Type a message here..."} className="w-full p-3 pr-20 h-12 bg-slate-100 border-transparent focus:border-purple-500 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none text-sm transition-shadow text-slate-800 placeholder-slate-500 resize-none scrollbar-thin" rows="1" maxLength={2000} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(e);}}} disabled={isSending || (currentChat.type === 'dm' && isCurrentChatBlocked)} />
               <span className={`absolute bottom-2 right-3 text-xs ${newMessage.length > 1800 ? (newMessage.length > 2000 ? 'text-red-500 font-semibold' : 'text-orange-500') : 'text-slate-400'}`}>{newMessage.length}/2000</span>
             </div>
             <button type="button" className="p-2.5 text-slate-500 hover:text-purple-600 rounded-full hover:bg-purple-50 transition-colors" title="Attach file (coming soon)" disabled><Paperclip size={22} /></button>
-            <button type="submit" disabled={isSending || !newMessage.trim() || newMessage.length > 2000 || isCurrentChatBlocked} className="bg-purple-600 text-white p-3 rounded-xl hover:bg-purple-700 disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center w-12 h-12 transition-colors shadow-md hover:shadow-lg transform active:scale-95">{isSending ? <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> : <Send size={20} />}</button>
+            <button type="submit" disabled={isSending || !newMessage.trim() || newMessage.length > 2000 || (currentChat.type === 'dm' && isCurrentChatBlocked)} className="bg-purple-600 text-white p-3 rounded-xl hover:bg-purple-700 disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center w-12 h-12 transition-colors shadow-md hover:shadow-lg transform active:scale-95">{isSending ? <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> : <Send size={20} />}</button>
           </form>
         </div>
       </div>
@@ -904,7 +1183,7 @@ const ChatWindow = () => {
 const ChatLayout = () => { const { currentChat, isMobileView } = useAppContext(); return ( <div className="h-screen w-screen flex flex-col md:flex-row overflow-hidden bg-slate-200 items-center justify-center p-0 md:p-4 lg:p-8"> <div className="flex h-full w-full max-w-screen-xl md:rounded-xl shadow-2xl overflow-hidden bg-white"> <div className={`md:flex flex-col ${isMobileView && currentChat ? 'hidden' : 'flex'}`}><ChatSidebar /></div> <div className={`flex-1 flex-col ${isMobileView && !currentChat ? 'hidden' : 'flex'}`}><ChatWindow /></div> </div> </div> );};
 
 const AdminPortalPanel = () => {
-  const { displaySystemNotification, setModalView, setModalData } = useAppContext();
+  const { displaySystemNotification, setModalView, setModalData, handleUserAction } = useAppContext();
   const [allUsersList, setAllUsersList] = useState([]);
   const [loadingUsers, setLoadingUsers] = useState(true);
 
@@ -923,9 +1202,12 @@ const AdminPortalPanel = () => {
     return () => unsubscribe();
   }, [displaySystemNotification]);
 
-  const handleViewUserProfile = (targetUser) => {
-    setModalData(targetUser);
-    setModalView('viewProfile');
+  const callHandleUserActionForProfile = (targetUser) => {
+    if (handleUserAction) {
+        handleUserAction('viewProfile', targetUser);
+    } else {
+        console.error("handleUserAction not available in AdminPortalPanel");
+    }
   };
 
   if (loadingUsers) {
@@ -940,25 +1222,76 @@ const AdminPortalPanel = () => {
           <p className="text-slate-500">No users found.</p>
         ) : (
           <ul className="space-y-3">
-            {allUsersList.map(u => (
-              <li key={u.uid} className="flex items-center justify-between p-3 bg-slate-50 hover:bg-slate-100 rounded-lg transition-colors">
-                <div className="flex items-center space-x-3">
-                  <img src={u.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(u.displayName || 'U')}&size=32&rounded=true`} alt={u.displayName} className="w-8 h-8 rounded-full"/>
-                  <div>
-                    <p className="text-sm font-medium text-slate-700">{u.displayName} <span className="text-xs text-slate-500">#{u.discriminator}</span></p>
-                    <p className="text-xs text-slate-500">{u.email}</p>
+            {allUsersList.map(u => {
+              const priorityBadge = getPriorityBadgeInfo(u.badges);
+              return (
+                <li key={u.uid} className="flex items-center justify-between p-3 bg-slate-50 hover:bg-slate-100 rounded-lg transition-colors">
+                  <div className="flex items-center space-x-3">
+                    <img src={u.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(u.displayName || 'U')}&size=32&rounded=true`} alt={u.displayName} className="w-8 h-8 rounded-full"/>
+                    <div>
+                      <p className="text-sm font-medium text-slate-700 flex items-center">
+                        {u.displayName}
+                        {priorityBadge && (
+                          <img 
+                            src={priorityBadge.imageSrc} 
+                            alt={priorityBadge.name} 
+                            title={`${priorityBadge.name}: ${priorityBadge.description}`}
+                            className="w-3.5 h-3.5 inline-block ml-1.5 align-middle" 
+                            onError={(e) => { e.target.style.display = 'none'; }}
+                          />
+                        )}
+                        <span className="text-xs text-slate-500 ml-1">#{u.discriminator}</span>
+                      </p>
+                      <p className="text-xs text-slate-500">{u.email}</p>
+                    </div>
                   </div>
-                </div>
-                <button 
-                  onClick={() => handleViewUserProfile(u)}
-                  className="px-3 py-1.5 text-xs font-medium text-purple-700 bg-purple-100 hover:bg-purple-200 rounded-md transition-colors"
-                >
-                  Manage Badges
-                </button>
-              </li>
-            ))}
+                  <button 
+                    onClick={() => callHandleUserActionForProfile(u)}
+                    className="px-3 py-1.5 text-xs font-medium text-purple-700 bg-purple-100 hover:bg-purple-200 rounded-md transition-colors"
+                  >
+                    Manage User
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         )}
+      </div>
+    </section>
+  );
+};
+
+const BlockedUsersPanel = () => {
+  const { blockedUsersData, handleUserAction, displaySystemNotification } = useAppContext();
+
+  if (!blockedUsersData || blockedUsersData.length === 0) {
+    return <p className="text-slate-500 text-center py-4">You haven't blocked any users.</p>;
+  }
+
+  return (
+    <section>
+      <h2 className="text-2xl font-semibold text-slate-800 mb-6">Blocked Users</h2>
+      <div className="bg-white p-6 rounded-lg shadow-md max-w-2xl">
+        <ul className="space-y-3">
+          {blockedUsersData.map(blockedUser => (
+            <li key={blockedUser.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg">
+              <div className="flex items-center space-x-3">
+                <img 
+                  src={blockedUser.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(blockedUser.displayName || 'U')}&size=32&rounded=true`} 
+                  alt={blockedUser.displayName} 
+                  className="w-8 h-8 rounded-full"
+                />
+                <span className="text-sm text-slate-700">{blockedUser.displayName || 'Unknown User'}</span>
+              </div>
+              <button 
+                onClick={() => handleUserAction('unblockUser', { uid: blockedUser.id, displayName: blockedUser.displayName })}
+                className="px-3 py-1.5 text-xs font-medium text-red-700 bg-red-100 hover:bg-red-200 rounded-md transition-colors"
+              >
+                Unblock
+              </button>
+            </li>
+          ))}
+        </ul>
       </div>
     </section>
   );
@@ -1048,14 +1381,23 @@ const SettingsPage = () => {
     { name: 'Account', id: 'account', icon: ShieldCheck }, 
     { name: 'Appearance', id: 'appearance', icon: Palette }, 
     { name: 'Notifications', id: 'notifications', icon: Bell },
+    { name: 'Blocked Users', id: 'blocked_users', icon: CircleSlash },
+    { name: 'Membership', id: 'membership', icon: Crown }
   ];
-  const settingsTabs = user?.isAdmin ? [...baseSettingsTabs, { name: 'Admin Portal', id: 'admin_portal', icon: SlidersHorizontal }] : baseSettingsTabs;
+  const settingsTabs = user?.isAdmin ? [...baseSettingsTabs, { name: 'Admin Portal', id: 'admin_portal', icon: UserCog }] : baseSettingsTabs; 
 
-  return ( <div className="h-screen w-screen flex flex-col bg-slate-100"> <header className="bg-white shadow-sm p-4 flex items-center space-x-3 sticky top-0 z-30"> <button onClick={() => setView('chat')} className="p-2 text-slate-600 hover:bg-slate-200 rounded-full"><ArrowLeft size={22} /></button> <h1 className="text-xl font-semibold text-slate-800">Settings</h1> </header> <div className="flex-1 flex flex-col md:flex-row overflow-hidden"> <nav className="w-full md:w-64 bg-white border-r border-slate-200 p-4 space-y-1 md:overflow-y-auto scrollbar-thin"> {settingsTabs.map(tab => ( <button key={tab.id} onClick={() => setActiveSettingsTab(tab.id)} className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg text-sm font-medium transition-colors ${activeSettingsTab === tab.id ? 'bg-purple-100 text-purple-700' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'}`}> <tab.icon size={20} /><span>{tab.name}</span> </button> ))} </nav> <main className="flex-1 p-6 sm:p-8 overflow-y-auto scrollbar-thin bg-slate-50"> {activeSettingsTab === 'profile' && ( <section><h2 className="text-2xl font-semibold text-slate-800 mb-6">Edit Profile</h2><div className="bg-white p-6 rounded-lg shadow-md space-y-5 max-w-2xl"> <div className="flex flex-col items-center"><img src={newPhotoURL || user?.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(newDisplayName || user?.displayName || 'U')}&background=D1D5DB&color=4B5563&bold=true&size=128&rounded=true`} alt="Profile" className="w-32 h-32 rounded-full object-cover mb-3 shadow-md border-4 border-purple-200"/><p className="text-sm text-slate-500">Update your photo by providing a URL below.</p></div> <div><label htmlFor="settingsDisplayName" className="block text-sm font-medium text-slate-700 mb-1">Display Name</label><input id="settingsDisplayName" type="text" value={newDisplayName} onChange={(e) => setNewDisplayName(e.target.value)} className="w-full px-4 py-3 border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 placeholder-slate-400" placeholder="Enter your display name"/></div> <div><label htmlFor="settingsPhotoURL" className="block text-sm font-medium text-slate-700 mb-1">Photo URL</label><input id="settingsPhotoURL" type="text" value={newPhotoURL} onChange={(e) => setNewPhotoURL(e.target.value)} className="w-full px-4 py-3 border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 placeholder-slate-400" placeholder="https://example.com/avatar.jpg"/></div> <div><label htmlFor="settingsBio" className="block text-sm font-medium text-slate-700 mb-1">Bio (max 200 chars)</label><textarea id="settingsBio" value={newBio} onChange={(e) => setNewBio(e.target.value)} maxLength="200" rows="3" className="w-full px-4 py-3 border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 placeholder-slate-400 resize-none scrollbar-thin" placeholder="Tell us a little about yourself..."/></div> <div className="pt-3 flex justify-end"><button onClick={handleProfileSave} disabled={isProfileSaving || !newDisplayName.trim()} className="px-6 py-2.5 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:opacity-60 flex items-center transition-colors">{isProfileSaving ? <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> : <Save size={16} className="mr-1.5"/>} Save Profile</button></div> </div></section> )} {activeSettingsTab === 'account' && ( <section><h2 className="text-2xl font-semibold text-slate-800 mb-6">Account Settings</h2><div className="bg-white p-6 rounded-lg shadow-md space-y-6 max-w-2xl"> <div><h3 className="text-lg font-medium text-slate-700 mb-1">Email Address</h3><p className="text-sm text-slate-500 bg-slate-100 p-3 rounded-md">{user?.email}</p></div> <div><h3 className="text-lg font-medium text-slate-700 mb-1">Your User Tag</h3><p className="text-sm text-slate-500 bg-slate-100 p-3 rounded-md">{user?.displayName || ''}#{user?.discriminator || '0000'}</p></div> <form onSubmit={handleChangePassword} className="space-y-4 pt-4 border-t border-slate-200"> <h3 className="text-lg font-medium text-slate-700">Change Password</h3> <div><label htmlFor="currentPassword"className="block text-sm font-medium text-slate-700 mb-1">Current Password</label><input id="currentPassword" type="password" value={currentPassword} onChange={e => setCurrentPassword(e.target.value)} required className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 placeholder-slate-400" placeholder="••••••••"/></div> <div><label htmlFor="newPassword"className="block text-sm font-medium text-slate-700 mb-1">New Password</label><input id="newPassword" type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} required className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 placeholder-slate-400" placeholder="New password (min. 6 characters)"/></div> <div><label htmlFor="confirmNewPassword"className="block text-sm font-medium text-slate-700 mb-1">Confirm New Password</label><input id="confirmNewPassword" type="password" value={confirmNewPassword} onChange={e => setConfirmNewPassword(e.target.value)} required className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 placeholder-slate-400" placeholder="Confirm new password"/></div> <div className="flex justify-end"><button type="submit" disabled={isPasswordSaving} className="px-6 py-2.5 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:opacity-60 flex items-center transition-colors">{isPasswordSaving ? <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25"></circle><path d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" className="opacity-75" fill="currentColor"></path></svg> : <ShieldCheck size={16} className="mr-1.5"/>} Update Password</button></div> </form> <div className="pt-6 border-t border-slate-200"><h3 className="text-lg font-medium text-red-600 mb-2">Danger Zone</h3><button onClick={handleDeleteAccount} className="w-full sm:w-auto px-6 py-2.5 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 flex items-center transition-colors"><Trash2 size={16} className="mr-1.5"/> Delete My Account</button><p className="text-xs text-slate-500 mt-2">This action is irreversible and will delete your user profile and related data.</p></div> </div></section> )} {activeSettingsTab === 'appearance' && ( <section><h2 className="text-2xl font-semibold text-slate-800 mb-6">Appearance</h2><div className="bg-white p-6 rounded-lg shadow-md space-y-5 max-w-2xl"> <h3 className="text-lg font-medium text-slate-700 mb-1">Theme</h3> <div className="grid grid-cols-1 sm:grid-cols-2 gap-4"> {[{ id: 'default', name: 'Default Light', icon: Sun, bg: 'bg-slate-100' }, { id: 'dark', name: 'Default Dark', icon: Moon, bg: 'bg-slate-800' }].map(t => ( <button key={t.id} onClick={() => setTheme(t.id)} className={`p-4 rounded-lg border-2 transition-all duration-150 focus:outline-none ${theme === t.id ? 'border-purple-500 ring-2 ring-purple-500 shadow-lg' : 'border-slate-300 hover:border-purple-400 hover:shadow-md'}`}> <div className={`w-full h-16 rounded mb-2 mx-auto ${t.bg} border border-slate-300`}></div> <div className="flex items-center justify-center"><t.icon size={18} className={`mr-2 ${theme === t.id ? 'text-purple-600' : 'text-slate-500'}`} /><span className={`text-sm font-medium ${theme === t.id ? 'text-purple-700' : 'text-slate-600'}`}>{t.name}</span></div> </button> ))} </div> </div></section> )} {activeSettingsTab === 'notifications' && ( <section><h2 className="text-2xl font-semibold text-slate-800 mb-6">Notification Settings</h2><div className="bg-white p-6 rounded-lg shadow-md space-y-5 max-w-2xl"> <div className="pt-0"> <h3 className="text-lg font-medium text-slate-700 mb-2">Browser Notifications</h3> {notificationPermission === 'default' && <button onClick={requestNotificationPerm} className="px-5 py-2.5 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 flex items-center transition-colors"><Bell size={16} className="mr-1.5"/> Enable Browser Notifications</button>} {notificationPermission === 'granted' && <p className="text-sm text-green-600 flex items-center"><CheckCircle size={18} className="mr-2"/> Browser notifications are enabled.</p>} {notificationPermission === 'denied' && <p className="text-sm text-red-600 flex items-center"><XCircle size={18} className="mr-2"/> Browser notifications are disabled. You can change this in your browser's site settings.</p>} </div> <div className="mt-6 pt-4 border-t border-slate-200"> <h3 className="text-lg font-medium text-slate-700 mb-2">Sound Effects</h3> <label htmlFor="soundToggle" className="flex items-center cursor-pointer p-3 bg-slate-50 rounded-lg hover:bg-slate-100 transition-colors"> <div className="relative"> <input type="checkbox" id="soundToggle" className="sr-only" checked={soundEnabled} onChange={handleSoundToggle} /> <div className={`block w-10 h-6 rounded-full transition-colors ${soundEnabled ? 'bg-purple-600' : 'bg-slate-300'}`}></div> <div className={`dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform ${soundEnabled ? 'translate-x-full' : ''}`}></div> </div> <span className="ml-3 text-sm font-medium text-slate-700">Enable In-App Sounds</span> {soundEnabled ? <Volume2 size={18} className="ml-auto text-purple-600"/> : <VolumeX size={18} className="ml-auto text-slate-500"/>} </label> </div> </div></section> )} {activeSettingsTab === 'admin_portal' && user?.isAdmin && <AdminPortalPanel />} </main> </div> </div> );
+  return ( <div className="h-screen w-screen flex flex-col bg-slate-100"> <header className="bg-white shadow-sm p-4 flex items-center space-x-3 sticky top-0 z-30"> <button onClick={() => setView('chat')} className="p-2 text-slate-600 hover:bg-slate-200 rounded-full"><ArrowLeft size={22} /></button> <h1 className="text-xl font-semibold text-slate-800">Settings</h1> </header> <div className="flex-1 flex flex-col md:flex-row overflow-hidden"> <nav className="w-full md:w-64 bg-white border-r border-slate-200 p-4 space-y-1 md:overflow-y-auto scrollbar-thin"> {settingsTabs.map(tab => ( <button key={tab.id} onClick={() => setActiveSettingsTab(tab.id)} className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg text-sm font-medium transition-colors ${activeSettingsTab === tab.id ? 'bg-purple-100 text-purple-700' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'}`}> <tab.icon size={20} /><span>{tab.name}</span> </button> ))} </nav> <main className="flex-1 p-6 sm:p-8 overflow-y-auto scrollbar-thin bg-slate-50"> {activeSettingsTab === 'profile' && ( <section><h2 className="text-2xl font-semibold text-slate-800 mb-6">Edit Profile</h2><div className="bg-white p-6 rounded-lg shadow-md space-y-5 max-w-2xl"> <div className="flex flex-col items-center"><img src={newPhotoURL || user?.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(newDisplayName || user?.displayName || 'U')}&background=D1D5DB&color=4B5563&bold=true&size=128&rounded=true`} alt="Profile" className="w-32 h-32 rounded-full object-cover mb-3 shadow-md border-4 border-purple-200"/><p className="text-sm text-slate-500">Update your photo by providing a URL below.</p></div> <div><label htmlFor="settingsDisplayName" className="block text-sm font-medium text-slate-700 mb-1">Display Name</label><input id="settingsDisplayName" type="text" value={newDisplayName} onChange={(e) => setNewDisplayName(e.target.value)} className="w-full px-4 py-3 border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 placeholder-slate-400" placeholder="Enter your display name"/></div> <div><label htmlFor="settingsPhotoURL" className="block text-sm font-medium text-slate-700 mb-1">Photo URL</label><input id="settingsPhotoURL" type="text" value={newPhotoURL} onChange={(e) => setNewPhotoURL(e.target.value)} className="w-full px-4 py-3 border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 placeholder-slate-400" placeholder="https://example.com/avatar.jpg"/></div> <div><label htmlFor="settingsBio" className="block text-sm font-medium text-slate-700 mb-1">Bio (max 200 chars)</label><textarea id="settingsBio" value={newBio} onChange={(e) => setNewBio(e.target.value)} maxLength="200" rows="3" className="w-full px-4 py-3 border border-slate-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 placeholder-slate-400 resize-none scrollbar-thin" placeholder="Tell us a little about yourself..."/></div> <div className="pt-3 flex justify-end"><button onClick={handleProfileSave} disabled={isProfileSaving || !newDisplayName.trim()} className="px-6 py-2.5 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:opacity-60 flex items-center transition-colors">{isProfileSaving ? <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> : <Save size={16} className="mr-1.5"/>} Save Profile</button></div> </div></section> )} {activeSettingsTab === 'account' && ( <section><h2 className="text-2xl font-semibold text-slate-800 mb-6">Account Settings</h2><div className="bg-white p-6 rounded-lg shadow-md space-y-6 max-w-2xl"> <div><h3 className="text-lg font-medium text-slate-700 mb-1">Email Address</h3><p className="text-sm text-slate-500 bg-slate-100 p-3 rounded-md">{user?.email}</p></div> <div><h3 className="text-lg font-medium text-slate-700 mb-1">Your User Tag</h3><p className="text-sm text-slate-500 bg-slate-100 p-3 rounded-md">{user?.displayName || ''}#{user?.discriminator || '0000'}</p></div> <form onSubmit={handleChangePassword} className="space-y-4 pt-4 border-t border-slate-200"> <h3 className="text-lg font-medium text-slate-700">Change Password</h3> <div><label htmlFor="currentPassword"className="block text-sm font-medium text-slate-700 mb-1">Current Password</label><input id="currentPassword" type="password" value={currentPassword} onChange={e => setCurrentPassword(e.target.value)} required className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 placeholder-slate-400" placeholder="••••••••"/></div> <div><label htmlFor="newPassword"className="block text-sm font-medium text-slate-700 mb-1">New Password</label><input id="newPassword" type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)} required className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 placeholder-slate-400" placeholder="New password (min. 6 characters)"/></div> <div><label htmlFor="confirmNewPassword"className="block text-sm font-medium text-slate-700 mb-1">Confirm New Password</label><input id="confirmNewPassword" type="password" value={confirmNewPassword} onChange={e => setConfirmNewPassword(e.target.value)} required className="w-full px-4 py-3 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 placeholder-slate-400" placeholder="Confirm new password"/></div> <div className="flex justify-end"><button type="submit" disabled={isPasswordSaving} className="px-6 py-2.5 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:opacity-60 flex items-center transition-colors">{isPasswordSaving ? <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25"></circle><path d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" className="opacity-75" fill="currentColor"></path></svg> : <ShieldCheck size={16} className="mr-1.5"/>} Update Password</button></div> </form> <div className="pt-6 border-t border-slate-200"><h3 className="text-lg font-medium text-red-600 mb-2">Danger Zone</h3><button onClick={handleDeleteAccount} className="w-full sm:w-auto px-6 py-2.5 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 flex items-center transition-colors"><Trash2 size={16} className="mr-1.5"/> Delete My Account</button><p className="text-xs text-slate-500 mt-2">This action is irreversible and will delete your user profile and related data.</p></div> </div></section> )} {activeSettingsTab === 'appearance' && ( <section><h2 className="text-2xl font-semibold text-slate-800 mb-6">Appearance</h2><div className="bg-white p-6 rounded-lg shadow-md space-y-5 max-w-2xl"> <h3 className="text-lg font-medium text-slate-700 mb-1">Theme</h3> <div className="grid grid-cols-1 sm:grid-cols-2 gap-4"> {[{ id: 'default', name: 'Default Light', icon: Sun, bg: 'bg-slate-100' }, { id: 'dark', name: 'Default Dark', icon: Moon, bg: 'bg-slate-800' }].map(t => ( <button key={t.id} onClick={() => setTheme(t.id)} className={`p-4 rounded-lg border-2 transition-all duration-150 focus:outline-none ${theme === t.id ? 'border-purple-500 ring-2 ring-purple-500 shadow-lg' : 'border-slate-300 hover:border-purple-400 hover:shadow-md'}`}> <div className={`w-full h-16 rounded mb-2 mx-auto ${t.bg} border border-slate-300`}></div> <div className="flex items-center justify-center"><t.icon size={18} className={`mr-2 ${theme === t.id ? 'text-purple-600' : 'text-slate-500'}`} /><span className={`text-sm font-medium ${theme === t.id ? 'text-purple-700' : 'text-slate-600'}`}>{t.name}</span></div> </button> ))} </div> </div></section> )} {activeSettingsTab === 'notifications' && ( <section><h2 className="text-2xl font-semibold text-slate-800 mb-6">Notification Settings</h2><div className="bg-white p-6 rounded-lg shadow-md space-y-5 max-w-2xl"> <div className="pt-0"> <h3 className="text-lg font-medium text-slate-700 mb-2">Browser Notifications</h3> {notificationPermission === 'default' && <button onClick={requestNotificationPerm} className="px-5 py-2.5 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 flex items-center transition-colors"><Bell size={16} className="mr-1.5"/> Enable Browser Notifications</button>} {notificationPermission === 'granted' && <p className="text-sm text-green-600 flex items-center"><CheckCircle size={18} className="mr-2"/> Browser notifications are enabled.</p>} {notificationPermission === 'denied' && <p className="text-sm text-red-600 flex items-center"><XCircle size={18} className="mr-2"/> Browser notifications are disabled. You can change this in your browser's site settings.</p>} </div> <div className="mt-6 pt-4 border-t border-slate-200"> <h3 className="text-lg font-medium text-slate-700 mb-2">Sound Effects</h3> <label htmlFor="soundToggle" className="flex items-center cursor-pointer p-3 bg-slate-50 rounded-lg hover:bg-slate-100 transition-colors"> <div className="relative"> <input type="checkbox" id="soundToggle" className="sr-only" checked={soundEnabled} onChange={handleSoundToggle} /> <div className={`block w-10 h-6 rounded-full transition-colors ${soundEnabled ? 'bg-purple-600' : 'bg-slate-300'}`}></div> <div className={`dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform ${soundEnabled ? 'translate-x-full' : ''}`}></div> </div> <span className="ml-3 text-sm font-medium text-slate-700">Enable In-App Sounds</span> {soundEnabled ? <Volume2 size={18} className="ml-auto text-purple-600"/> : <VolumeX size={18} className="ml-auto text-slate-500"/>} </label> </div> </div></section> )} {activeSettingsTab === 'blocked_users' && <BlockedUsersPanel />} {activeSettingsTab === 'membership' && ( <section><h2 className="text-2xl font-semibold text-slate-800 mb-6">Skab Membership</h2><div className="bg-white p-6 rounded-lg shadow-md max-w-2xl space-y-6"> <div className="p-4 border border-purple-200 rounded-lg bg-purple-50"> <div className="flex items-center mb-2"> <Crown size={24} className="text-purple-600 mr-3"/> <h3 className="text-lg font-semibold text-purple-700">Skab Plus</h3> </div> <p className="text-sm text-slate-600 mb-3">Unlock exclusive features, enhanced customization, and priority support with Skab Plus.</p> <button className="w-full px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md shadow-sm transition-colors">Learn More (Coming Soon)</button> </div> <div className="p-4 border border-indigo-200 rounded-lg bg-indigo-50"> <div className="flex items-center mb-2"> <Diamond size={24} className="text-indigo-600 mr-3"/> <h3 className="text-lg font-semibold text-indigo-700">Skab Platinum</h3> </div> <p className="text-sm text-slate-600 mb-3">The ultimate Skab experience with all Plus benefits, unique badges, early access to new features, and more!</p> <button className="w-full px-4 py-2 text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded-md shadow-sm transition-colors">Learn More (Coming Soon)</button> </div> </div></section> )} {activeSettingsTab === 'admin_portal' && user?.isAdmin && <AdminPortalPanel />} </main> </div> </div> );
 };
 
 const NotificationItem = React.memo(({ notification, onMarkAsRead, onView }) => {
-  const IconComponent = { new_message: MessageSquareText, friend_request_received: UserPlus, friend_request_accepted: UserCheck, default: Bell }[notification.type] || Bell;
+  const IconComponent = { 
+    new_message: MessageSquareText, 
+    friend_request_received: UserPlus, 
+    friend_request_accepted: UserCheck, 
+    group_invite_received: MailPlus, 
+    new_group_message: UsersRound, 
+    default: Bell 
+  }[notification.type] || Bell;
   const handleView = (e) => { e.stopPropagation(); if (onView) onView(notification); };
   const handleMarkRead = (e) => { e.stopPropagation(); if (onMarkAsRead) onMarkAsRead(notification.id); };
   return (
@@ -1097,7 +1439,7 @@ const NotificationsPanel = () => {
             getDoc(partnerDocRef).then(docSnap => {
                 if (docSnap.exists()) {
                     const partnerData = docSnap.data();
-                     setCurrentChat({ id: partnerData.uid, type: 'dm', name: `${partnerData.displayName || partnerData.email.split('@')[0]}#${partnerData.discriminator || '0000'}`, rawName: partnerData.displayName || partnerData.email.split('@')[0], discriminator: partnerData.discriminator || '0000', photoURL: partnerData.photoURL });
+                     setCurrentChat({ id: partnerData.uid, type: 'dm', name: `${partnerData.displayName || partnerData.email.split('@')[0]}#${partnerData.discriminator || '0000'}`, rawName: partnerData.displayName || partnerData.email.split('@')[0], discriminator: partnerData.discriminator || '0000', photoURL: partnerData.photoURL, badges: partnerData.badges || [] });
                     setView('chat');
                 } else { displaySystemNotification("Could not find user for this chat.", "error"); }
             }).catch(err => displaySystemNotification("Error opening chat.", "error"));
@@ -1111,6 +1453,19 @@ const NotificationsPanel = () => {
         } else if (notification.link === '/friends') { 
             setView('chat'); 
             displaySystemNotification("Check your Friends tab for requests.", "info");
+        } else if (notification.link.startsWith('/group/')) {
+            const groupId = notification.link.split('/group/')[1];
+            const groupDocRef = doc(db, "groups", groupId);
+            getDoc(groupDocRef).then(docSnap => {
+                if (docSnap.exists()) {
+                    const groupData = docSnap.data();
+                    setCurrentChat({
+                        id: groupId, type: 'group', name: groupData.name, rawName: groupData.name,
+                        members: groupData.members, memberInfo: groupData.memberInfo, photoURL: groupData.photoURL
+                    });
+                    setView('chat');
+                } else { displaySystemNotification("Could not find group.", "error"); }
+            }).catch(err => displaySystemNotification("Error opening group.", "error"));
         }
     }
     if (!notification.isRead) handleMarkAsRead(notification.id);
@@ -1167,14 +1522,10 @@ const AdminBadgeManager = ({ targetUserId, currentBadges = [] }) => {
 
   const handleSaveBadges = async () => {
     setIsSaving(true);
-    // Preserve non-assignable badges (like 'Admin') if they exist from direct DB edit
     const existingAdminBadge = currentBadges.includes('Admin') ? ['Admin'] : [];
-    const finalBadges = [...new Set([...existingAdminBadge, ...Array.from(selectedBadges)])]; // Ensure Admin is preserved and no duplicates
+    const finalBadges = [...new Set([...existingAdminBadge, ...Array.from(selectedBadges)])]; 
 
     const success = await assignBadgesToUser(targetUserId, finalBadges);
-    if (success) {
-      // displaySystemNotification("Badges updated successfully!", "success"); // Already shown by assignBadgesToUser
-    }
     setIsSaving(false);
   };
 
@@ -1214,11 +1565,49 @@ const AdminBadgeManager = ({ targetUserId, currentBadges = [] }) => {
 
 const UserProfileModal = () => {
   const { modalView, setModalView, modalData, setModalData, user, friends, friendRequests, handleUserAction, displaySystemNotification, setCurrentChat, setView } = useAppContext(); 
+  const [mutualFriends, setMutualFriends] = useState([]);
+
+  useEffect(() => {
+    const fetchMutualFriends = async () => {
+      if (modalView === 'viewProfile' && modalData && user && modalData.uid !== user.uid) {
+        try {
+          const targetUserFriendsRef = collection(db, `users/${modalData.uid}/friends`);
+          const targetUserFriendsSnap = await getDocs(query(targetUserFriendsRef, where("status", "==", "accepted")));
+          const targetUserFriendIds = new Set(targetUserFriendsSnap.docs.map(doc => doc.data().friendUid));
+          
+          const currentUserFriendIds = new Set(friends.map(f => f.friendUid));
+          
+          const mutualFriendIds = [...targetUserFriendIds].filter(id => currentUserFriendIds.has(id));
+          
+          if (mutualFriendIds.length > 0) {
+            const mutualFriendsData = [];
+            for (const friendId of mutualFriendIds) {
+              const friendDoc = await getDoc(doc(db, "users", friendId));
+              if (friendDoc.exists()) {
+                mutualFriendsData.push({ id: friendDoc.id, ...friendDoc.data() });
+              }
+            }
+            setMutualFriends(mutualFriendsData);
+          } else {
+            setMutualFriends([]);
+          }
+        } catch (error) {
+          console.error("Error fetching mutual friends:", error);
+          setMutualFriends([]);
+        }
+      } else {
+        setMutualFriends([]);
+      }
+    };
+    fetchMutualFriends();
+  }, [modalView, modalData, user, friends]);
 
   if (modalView !== 'viewProfile' || !modalData) return null;
 
   const targetUser = modalData; 
   const viewingUser = user; 
+  const priorityBadge = getPriorityBadgeInfo(targetUser.badges);
+
 
   const isSelf = viewingUser?.uid === targetUser.uid;
   const isAlreadyFriend = friends.some(f => f.friendUid === targetUser.uid);
@@ -1231,7 +1620,8 @@ const UserProfileModal = () => {
         name: `${targetUser.displayName || targetUser.email?.split('@')[0]}#${targetUser.discriminator || '0000'}`,
         rawName: targetUser.displayName || targetUser.email?.split('@')[0], 
         discriminator: targetUser.discriminator || '0000', 
-        photoURL: targetUser.photoURL
+        photoURL: targetUser.photoURL,
+        badges: targetUser.badges || []
     });
     setView('chat');
     setModalView(null); 
@@ -1244,7 +1634,18 @@ const UserProfileModal = () => {
       <div className="bg-white p-6 sm:p-8 rounded-xl shadow-2xl w-full max-w-md transform transition-all flex flex-col items-center">
         <button onClick={() => { setModalView(null); setModalData(null); }} className="absolute top-3 right-3 text-slate-400 hover:text-slate-600 p-1.5 rounded-full hover:bg-slate-100"><X size={22} /></button>
         <img src={targetUser.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(targetUser.displayName || 'U')}&background=8B5CF6&color=FFFFFF&bold=true&rounded=true&size=128`} alt={targetUser.displayName} className="w-24 h-24 sm:w-32 sm:h-32 rounded-full object-cover mb-4 shadow-lg border-4 border-purple-300"/>
-        <h2 className="text-2xl sm:text-3xl font-bold text-slate-800">{targetUser.displayName || 'User'}</h2>
+        <h2 className="text-2xl sm:text-3xl font-bold text-slate-800 flex items-center">
+          {targetUser.displayName || 'User'}
+          {priorityBadge && (
+            <img 
+              src={priorityBadge.imageSrc} 
+              alt={priorityBadge.name} 
+              title={`${priorityBadge.name}: ${priorityBadge.description}`}
+              className="w-5 h-5 inline-block ml-2 align-middle"
+              onError={(e) => { e.target.style.display = 'none'; }}
+            />
+          )}
+        </h2>
         <p className="text-slate-500 text-sm">#{targetUser.discriminator || '0000'}</p>
         
         {targetUser.badges && targetUser.badges.length > 0 && (
@@ -1252,6 +1653,8 @@ const UserProfileModal = () => {
             {targetUser.badges.map(badgeId => {
               const badgeInfo = BADGE_DEFINITIONS[badgeId];
               if (!badgeInfo) return null;
+              // Don't re-render the priority badge if it was already shown next to the name
+              if (priorityBadge && badgeInfo.id === priorityBadge.id) return null; 
               return (
                 <img 
                   key={badgeId} 
@@ -1259,15 +1662,35 @@ const UserProfileModal = () => {
                   alt={badgeInfo.name} 
                   title={`${badgeInfo.name}: ${badgeInfo.description}`} 
                   className="w-8 h-8 sm:w-10 sm:h-10"
-                  onError={(e) => { e.target.style.display = 'none'; /* Hide if image fails */ }}
+                  onError={(e) => { e.target.style.display = 'none'; }}
                 />
               );
             })}
           </div>
         )}
 
+
         {targetUser.bio && (<p className="text-sm text-slate-600 my-3 text-center max-w-xs italic">"{targetUser.bio}"</p>)}
         <p className="text-sm text-slate-600 my-2">Status: <span className="font-medium text-green-500">{targetUser.status || 'Online'}</span></p>
+        
+        {!isSelf && mutualFriends.length > 0 && (
+          <div className="mt-4 w-full text-center">
+            <p className="text-xs text-slate-500 mb-1">{mutualFriends.length} Mutual Friend{mutualFriends.length > 1 ? 's' : ''}:</p>
+            <div className="flex flex-wrap justify-center gap-1">
+              {mutualFriends.slice(0, 5).map(mf => ( // Show max 5 mutual friends for brevity
+                <img 
+                  key={mf.id} 
+                  src={mf.photoURL || `https://ui-avatars.com/api/?name=${encodeURIComponent(mf.displayName || 'M')}&size=24&rounded=true`} 
+                  alt={mf.displayName} 
+                  title={mf.displayName}
+                  className="w-6 h-6 rounded-full border border-white"
+                />
+              ))}
+              {mutualFriends.length > 5 && <span className="text-xs text-slate-400 self-center ml-1">+{mutualFriends.length - 5} more</span>}
+            </div>
+          </div>
+        )}
+
 
         {!isSelf && (
           <div className="mt-6 w-full space-y-3">
@@ -1292,7 +1715,7 @@ const UserProfileModal = () => {
           </div>
         )}
         {viewingUser?.isAdmin && !isSelf && (
-          <AdminBadgeManager targetUserId={targetUser.uid} currentBadges={targetUser.badges} />
+          <AdminBadgeManager targetUserId={targetUser.uid} currentBadges={targetUser.badges || []} />
         )}
          <button onClick={() => { setModalView(null); setModalData(null); }} className="mt-6 text-sm text-purple-600 hover:underline">Close</button>
       </div>
@@ -1324,5 +1747,58 @@ const MainContent = () => {
     </div>
   );
 };
+
+const CreateGroupModal = ({ onClose, onCreateGroup }) => {
+  const [groupName, setGroupName] = useState('');
+  const [isCreating, setIsCreating] = useState(false);
+  const { displaySystemNotification } = useAppContext();
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!groupName.trim()) {
+      displaySystemNotification("Group name cannot be empty.", "error");
+      return;
+    }
+    setIsCreating(true);
+    const success = await onCreateGroup(groupName.trim());
+    setIsCreating(false);
+    if (success) {
+      onClose();
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 backdrop-blur-sm flex items-center justify-center z-[70] p-4">
+      <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md">
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-xl font-semibold text-slate-800">Create New Group</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X size={20}/></button>
+        </div>
+        <form onSubmit={handleSubmit}>
+          <div>
+            <label htmlFor="groupName" className="block text-sm font-medium text-slate-700 mb-1">Group Name</label>
+            <input 
+              type="text" 
+              id="groupName"
+              value={groupName}
+              onChange={(e) => setGroupName(e.target.value)}
+              className="w-full px-3 py-2 border border-slate-300 rounded-md shadow-sm focus:outline-none focus:ring-purple-500 focus:border-purple-500 sm:text-sm"
+              placeholder="Enter group name (e.g., Study Buddies)"
+              maxLength={50}
+            />
+          </div>
+          <div className="mt-6 flex justify-end space-x-3">
+            <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-md">Cancel</button>
+            <button type="submit" disabled={isCreating} className="px-4 py-2 text-sm font-medium text-white bg-purple-600 hover:bg-purple-700 rounded-md disabled:opacity-50 flex items-center">
+              {isCreating ? <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> : <PlusCircle size={16} className="mr-1.5"/>}
+              Create Group
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
+
 
 export default App;
