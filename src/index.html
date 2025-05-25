@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="%PUBLIC_URL%/favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#000000" />
+    <meta
+      name="description"
+      content="ChitterType - A real-time chat application"
+    />
+    <link rel="apple-touch-icon" href="%PUBLIC_URL%/logo192.png" />
+    <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
+    <title>ChitterType Chat</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class', // or 'media' if you prefer OS-level dark mode
+        theme: {
+          extend: {
+            colors: {
+              'brand-purple': '#6A0DAD', // A deep purple, adjust as needed
+              'brand-purple-light': '#E0B0FF', // A lighter shade for accents/backgrounds
+              'brand-purple-dark': '#4B0082',  // A darker shade for hover/active states
+              'brand-primary': { // Defining a primary color object
+                light: '#A78BFA', // Lighter purple (e.g., violet-400)
+                DEFAULT: '#8B5CF6', // Main purple (e.g., violet-500)
+                dark: '#7C3AED',   // Darker purple (e.g., violet-600)
+              },
+              'brand-secondary': '#F3F4F6', // Light gray (e.g., gray-100)
+              'brand-muted': '#6B7280',   // Medium gray for text (e.g., gray-500)
+            },
+            fontFamily: {
+              sans: ['Inter', 'system-ui', 'sans-serif'],
+            },
+            borderRadius: {
+              'xl': '1.0rem', // Slightly larger rounded corners
+              '2xl': '1.5rem',
+              '3xl': '2.0rem',
+            }
+          }
+        },
+        plugins: [],
+      }
+    </script>
+    </head>
+  <body class="antialiased">
+    <noscript>You need to enable JavaScript to run this app.</noscript>
+    <div id="root"></div>
+    </body>
+</html>

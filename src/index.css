@@ -1,0 +1,209 @@
+/* src/index.css */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    @apply bg-slate-200; /* Default background for the entire page if no theme is applied or for the outer area */
+    @apply text-slate-800; /* Default text color for the body */
+  }
+
+  /* Apply selection styles globally */
+  ::selection {
+    @apply bg-purple-500 text-white;
+  }
+  ::-moz-selection { /* Firefox */
+    @apply bg-purple-500 text-white;
+  }
+
+  /* Theme-specific base overrides for elements when a theme class is on the <html> tag */
+  html.theme-lava-lamp-purple, 
+  html.theme-ocean-wave {
+    color: theme('colors.slate.200'); /* Base text color for these dark themes */
+  }
+
+  /* Input placeholder colors for dark themes */
+  html.theme-lava-lamp-purple input::placeholder,
+  html.theme-lava-lamp-purple textarea::placeholder,
+  html.theme-ocean-wave input::placeholder,
+  html.theme-ocean-wave textarea::placeholder { 
+    color: theme('colors.slate.400'); 
+  }
+  
+  /* Overrides for specific text utility classes when a dark theme is active */
+  html.theme-lava-lamp-purple .text-slate-800, html.theme-ocean-wave .text-slate-800 { @apply text-slate-100; }
+  html.theme-lava-lamp-purple .text-slate-700, html.theme-ocean-wave .text-slate-700 { @apply text-slate-200; }
+  html.theme-lava-lamp-purple .text-slate-600, html.theme-ocean-wave .text-slate-600 { @apply text-slate-300; }
+  /* Corrected circular dependency for .text-slate-500 */
+  html.theme-lava-lamp-purple .text-slate-500, 
+  html.theme-ocean-wave .text-slate-500 { 
+    color: theme('colors.slate.400'); /* Directly set the color */
+  }
+  /* Corrected circular dependency for .text-slate-400 */
+  html.theme-lava-lamp-purple .text-slate-400, 
+  html.theme-ocean-wave .text-slate-400 { 
+    color: theme('colors.slate.500'); /* Directly set the color */
+  }
+
+  /* Overrides for specific background utility classes when a dark theme is active */
+  html.theme-lava-lamp-purple .bg-white, 
+  html.theme-ocean-wave .bg-white {
+    @apply bg-slate-800 bg-opacity-80 backdrop-blur-sm border border-slate-700; /* Add subtle border */
+  }
+  html.theme-lava-lamp-purple .bg-slate-50, 
+  html.theme-ocean-wave .bg-slate-50 {
+    @apply bg-slate-900 bg-opacity-70 backdrop-blur-sm border border-slate-700;
+  }
+  html.theme-lava-lamp-purple .bg-slate-100, 
+  html.theme-ocean-wave .bg-slate-100 {
+    @apply bg-slate-800; 
+  }
+   html.theme-lava-lamp-purple .border-slate-200, 
+  html.theme-ocean-wave .border-slate-200 {
+    @apply border-slate-700; 
+  }
+
+  /* Theme-specific scrollbar overrides for elements with .scrollbar-thin */
+  html.theme-lava-lamp-purple .scrollbar-thin::-webkit-scrollbar-thumb,
+  html.theme-ocean-wave .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply bg-slate-600; 
+  }
+  html.theme-lava-lamp-purple .scrollbar-thin::-webkit-scrollbar-thumb:hover,
+  html.theme-ocean-wave .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    @apply bg-slate-500; 
+  }
+  html.theme-lava-lamp-purple .scrollbar-thin::-webkit-scrollbar-track,
+  html.theme-ocean-wave .scrollbar-thin::-webkit-scrollbar-track {
+    @apply bg-slate-800; 
+  }
+  html.theme-lava-lamp-purple .scrollbar-thin,
+  html.theme-ocean-wave .scrollbar-thin {
+    scrollbar-color: theme('colors.slate.600') theme('colors.slate.800'); /* For Firefox */
+  }
+}
+
+@layer components {
+  /* Default scrollbar styling for elements with .scrollbar-thin */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: theme('colors.slate.300') theme('colors.slate.100');
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-track {
+    @apply bg-slate-100 rounded-lg; 
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply bg-slate-300 rounded-lg;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    @apply bg-slate-400;
+  }
+}
+
+@layer utilities {
+  /* Lava Lamp Theme specific utilities - applied to <html> tag */
+  html.theme-lava-lamp-purple {
+    @apply bg-slate-900; 
+    overflow: hidden; 
+    position: relative;
+    min-height: 100vh; 
+  }
+
+  html.theme-lava-lamp-purple::before,
+  html.theme-lava-lamp-purple::after {
+    content: '';
+    position: fixed; /* Use fixed to ensure it covers viewport even if body scrolls */
+    left: 50%;
+    top: 50%; 
+    min-width: 300vmax; 
+    min-height: 300vmax;
+    background: radial-gradient(ellipse at center, theme('colors.purple.600') 0%, theme('colors.pink.500') 50%, transparent 70%);
+    opacity: 0.25; 
+    animation-name: lava-rotate;
+    animation-iteration-count: infinite;
+    animation-timing-function: linear;
+    z-index: -1; /* Ensure it's behind all content */
+    filter: blur(120px); 
+  }
+
+  html.theme-lava-lamp-purple::before {
+    border-radius: 45%;
+    animation-duration: 25s; 
+    transform-origin: center center;
+  }
+
+  html.theme-lava-lamp-purple::after {
+    border-radius: 40%;
+    animation-duration: 20s; 
+    animation-direction: reverse; 
+    background: radial-gradient(ellipse at center, theme('colors.indigo.600') 0%, theme('colors.purple.400') 50%, transparent 70%);
+    opacity: 0.2; 
+    transform-origin: center center;
+  }
+
+  /* Ocean Wave Theme specific utilities - applied to <html> tag */
+  html.theme-ocean-wave {
+    @apply bg-slate-900;
+    overflow: hidden;
+    position: relative;
+    min-height: 100vh;
+  }
+  html.theme-ocean-wave::before {
+    content: '';
+    position: fixed; /* Use fixed for viewport coverage */
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(45deg, theme('colors.blue.500'), theme('colors.teal.400'), theme('colors.cyan.300'), theme('colors.blue.600'));
+    background-size: 400% 400%;
+    animation: ocean-wave-bg 20s ease infinite;
+    z-index: -1; /* Behind all content */
+    opacity: 0.3; /* Adjusted opacity */
+    filter: blur(60px); /* Adjusted blur */
+  }
+}
+
+/* Keyframe Animations */
+@keyframes lava-rotate {
+  0% { transform: translate(-50%, -50%) rotate(0deg) scale(1); }
+  50% { transform: translate(-50%, -50%) rotate(180deg) scale(1.15); }
+  100% { transform: translate(-50%, -50%) rotate(360deg) scale(1); }
+}
+
+@keyframes ocean-wave-bg {
+	0% { background-position: 0% 50%; }
+	50% { background-position: 100% 50%; }
+	100% { background-position: 0% 50%; }
+}
+
+/* Animation for error/notification display */
+@keyframes slide-in-right {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.animate-slide-in-right { animation: slide-in-right 0.3s ease-out forwards; }
+
+/* Animation for modal appearance */
+@keyframes modal-appear {
+  from { opacity: 0; transform: scale(0.95) translateY(10px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+.animate-modal-appear { animation: modal-appear 0.25s ease-out forwards; }
+
+/* The .app-shell > * z-index rule from before might not be needed if the 
+  theme pseudo-elements are on `html` and have z-index: -1.
+  The content by default will be above a z-index: -1 pseudo-element on the html tag.
+  If you have an .app-shell div directly inside body, ensure its children have a positive z-index
+  if they need to appear above the animated backgrounds.
+  The App.jsx applies theme classes to document.documentElement (the <html> tag),
+  and the animated backgrounds use z-index: 0 (or -1 as I've set now for ::before/::after on html).
+  Content within the body should naturally appear above this.
+*/
