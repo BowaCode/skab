@@ -1,0 +1,13 @@
+{
+  "files": {
+    "main.css": "/skab/static/css/main.7456ad30.css",
+    "main.js": "/skab/static/js/main.29030097.js",
+    "index.html": "/skab/index.html",
+    "main.7456ad30.css.map": "/skab/static/css/main.7456ad30.css.map",
+    "main.29030097.js.map": "/skab/static/js/main.29030097.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.7456ad30.css",
+    "static/js/main.29030097.js"
+  ]
+}
